@@ -5,12 +5,13 @@ import { Muxer, ArrayBufferTarget } from './vendor/mp4-muxer.mjs';
 
 const DEFAULTS = {
   format: '16:9', fps: 30, audio: true, quality: 'high',
-  design: { source: 'text', text: 'GN', above: '', below: '', subSize: 20, aboveGap: 20, belowGap: 20, blend: 'overlay', strength: 170, size: 100, x: 50, y: 35.9 },
+  design: { source: 'text', text: 'GN', above: '', below: '', fill: 'fade', subSize: 20, aboveGap: 20, belowGap: 20, subStrength: 59, blend: 'overlay', strength: 170, size: 100, x: 50, y: 35.9 },
   glow:   { on: true, halo: 170, haloSize: 69, haloBlend: 'overlay', bloom: 120, bloomSize: 10.5 },
   ca:     { on: true, mode: 'radial', style: 'spectral', amount: 3, falloff: 1.5, angle: 0 },
   grain:  { on: true, amount: 10, size: 1, color: 'mono', motion: 'moving' },
   video:  { zoom: 100, panX: 0, panY: 0, exposure: 0, contrast: 0, saturation: 0 },
   look:   { on: true, vignette: 80, spread: 53 },
+  logo:   { on: true, size: 6.1, y: 90.2 },
 };
 const FORMATS = { '16:9': [1920, 1080], '1:1': [1080, 1080], '4:5': [1080, 1350], '9:16': [1080, 1920] };
 const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -43,6 +44,7 @@ const media = {
   el: null, file: null, name: '', w: 0, h: 0, duration: 6,
   image: null, imageName: '',   // dropped / pasted design PNG
   text: null,                   // rendered text design { canvas, fit, px }
+  logo: null, logoName: '',     // logo image (kept in this browser)
 };
 const activeDesign = () => (S.design.source === 'text' ? media.text : media.image);
 const clip = { in: 0, out: 6 };
@@ -66,7 +68,7 @@ const TXT = {
   maxW: 0.84, maxH: 0.66, // auto-fit box, fraction of the frame
   ss: 2,                  // rendered at 2x output so scaling up stays sharp
   y: 35.9,                // GN centre in the Figma frame: 484.5 / 1350
-  subTracking: -0.02, subLeading: 1.25,
+  subTracking: -0.06, subLeading: 1.25, // "OBOL burned" in Obol Internal 97:47: same font and tracking as the main text
 };
 const FALLBACK = '"Helvetica Neue", Helvetica, Arial, sans-serif';
 let textFamily = FALLBACK, fontName = '', fontSeq = 0;
@@ -113,6 +115,50 @@ async function loadFontFile(file) {
   toast('Font: ' + name + ' (saved in this browser)');
   updateMediaLabels(); changed();
 }
+// Logo: SVG or PNG, drawn last at the bottom centre with no effects. Kept in this browser (IndexedDB).
+async function useLogo(blob, name, save) {
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  try { await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; }); }
+  catch (e) { toast('Could not read that logo', true); return false; }
+  let src = img;
+  if (/svg/.test(blob.type) || /\.svg$/i.test(name)) { // raster vectors big enough for 4K, mipmaps do the rest
+    const a = (img.naturalWidth && img.naturalHeight) ? img.naturalWidth / img.naturalHeight : 1;
+    const c = document.createElement('canvas'); c.height = 512; c.width = Math.max(1, Math.round(512 * a));
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); src = c;
+  }
+  renderer.setLogo(src);
+  media.logo = src; media.logoName = name;
+  if (save) { S.logo.on = true; try { await idbPut('logo', { blob, name }); } catch (e) {} }
+  updateLogoLabel(); changed();
+  return true;
+}
+function clearLogo() {
+  renderer.setLogo(null); media.logo = null; media.logoName = '';
+  idb().then((db) => db.transaction('kv', 'readwrite').objectStore('kv').delete('logo')).catch(() => {});
+  updateLogoLabel(); changed();
+}
+const logoInput = document.createElement('input');
+logoInput.type = 'file'; logoInput.accept = '.svg,.png,.webp,image/svg+xml,image/png,image/webp'; logoInput.hidden = true;
+logoInput.addEventListener('change', (e) => { const f = e.target.files[0]; if (f) useLogo(f, f.name, true); e.target.value = ''; });
+document.body.appendChild(logoInput);
+let updateLogoLabel = () => {};
+function buildLogoRow(parent) {
+  const r = document.createElement('div'); r.className = 'font-row';
+  const n = document.createElement('span'); n.className = 'font-name';
+  const b = document.createElement('button'); b.className = 'ghost'; b.title = 'SVG or PNG, white on transparent. Stays in this browser.';
+  b.addEventListener('click', () => logoInput.click());
+  const x = document.createElement('button'); x.className = 'ghost'; x.textContent = 'Remove';
+  x.addEventListener('click', clearLogo);
+  r.append(n, b, x); parent.appendChild(r);
+  updateLogoLabel = () => {
+    n.textContent = media.logo ? media.logoName : 'No logo (SVG or PNG, drawn on top, no effects)';
+    b.textContent = media.logo ? 'Replace' : 'Add logo';
+    x.hidden = !media.logo;
+  };
+  updateLogoLabel();
+}
+idbGet('logo').then((rec) => { if (rec && rec.blob) useLogo(rec.blob, rec.name, false); }).catch(() => {});
 const fontInput = document.createElement('input');
 fontInput.type = 'file'; fontInput.accept = '.otf,.ttf,.woff,.woff2'; fontInput.hidden = true;
 fontInput.addEventListener('change', () => { const f = fontInput.files[0]; if (f) loadFontFile(f); fontInput.value = ''; });
@@ -151,10 +197,12 @@ function layoutText(d, P) {
   const items = [];
   const main = has(d.text) ? measureText(d.text, P) : null;
   const mh = main ? main.height : 0;
-  if (main) items.push({ m: main, capTop: -mh / 2, grad: true });
-  const sp = P * d.subSize / 100;
-  if (has(d.above)) { const m = measureText(d.above, sp, TXT.subTracking, TXT.subLeading); items.push({ m, capTop: -mh / 2 - d.aboveGap / 100 * P - m.height, grad: false }); }
-  if (has(d.below)) { const m = measureText(d.below, sp, TXT.subTracking, TXT.subLeading); items.push({ m, capTop: mh / 2 + d.belowGap / 100 * P, grad: false }); }
+  if (main) items.push({ m: main, capTop: -mh / 2, grad: d.fill !== 'solid', alpha: 1 });
+  // Subtitles are solid. In Figma the number is the glow group twice (100% + 70%), the subtitle once, so
+  // Sub strength 59 (= 100 / 170) makes it as much dimmer as there.
+  const sp = P * d.subSize / 100, sa = Math.max(0, Math.min(1, d.subStrength / 100));
+  if (has(d.above)) { const m = measureText(d.above, sp, TXT.subTracking, TXT.subLeading); items.push({ m, capTop: -mh / 2 - d.aboveGap / 100 * P - m.height, grad: false, alpha: sa }); }
+  if (has(d.below)) { const m = measureText(d.below, sp, TXT.subTracking, TXT.subLeading); items.push({ m, capTop: mh / 2 + d.belowGap / 100 * P, grad: false, alpha: sa }); }
   if (!items.length) return null;
   const capTop = Math.min(...items.map((it) => it.capTop)), capBot = Math.max(...items.map((it) => it.capTop + it.m.height));
   return { items, width: Math.max(...items.map((it) => it.m.width)), height: capBot - capTop };
@@ -179,6 +227,7 @@ function textCanvas(d, W, H) {
   for (const it of lay.items) {
     const m = it.m;
     setTextFont(ctx, m.px, m.tracking);
+    ctx.globalAlpha = it.alpha;
     m.L.forEach((ln, i) => {
       if (!ln.s) return;
       const base = ch / 2 + it.capTop + m.cap + i * m.lead;
@@ -186,23 +235,51 @@ function textCanvas(d, W, H) {
         const g = ctx.createLinearGradient(0, base - m.cap, 0, base);
         g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(1, '#fff');
         ctx.fillStyle = g;
-      } else ctx.fillStyle = '#fff'; // subtitles: solid, so small text stays readable
+      } else ctx.fillStyle = '#fff'; // Solid fill (the 6,316,573 look) and subtitles
       ctx.fillText(ln.s, (cw - ln.w) / 2, base);
     });
   }
   return { canvas: cv, fit: cw / (W * TXT.ss), px: auto };
 }
 let textKey = '';
-const textKeyNow = () => { const d = S.design; return [S.format, d.text, d.above, d.below, d.subSize, d.aboveGap, d.belowGap, textFamily].join('\u0001'); };
+const textKeyNow = () => { const d = S.design; return [S.format, d.text, d.above, d.below, d.fill, d.subSize, d.aboveGap, d.belowGap, d.subStrength, textFamily].join('\u0001'); };
 function buildText() {
   const [W, H] = outDims();
   textKey = textKeyNow();
   media.text = textCanvas(S.design, W, H);
   if (S.design.source === 'text') renderer.setDesign(media.text ? media.text.canvas : null, media.text ? media.text.fit : 1);
 }
+// Both Figma posts blur in proportion to the text (halo = 14% of the font size, bloom = 2.2%), so in text
+// mode the Halo / Bloom sizes are for GN-sized text and scale with the text actually drawn.
+function glowScaleNow() {
+  if (S.design.source !== 'text' || !media.text) return 1;
+  const [W, H] = outDims();
+  return media.text.px * S.design.size / 100 / (TXT.size * Math.min(W, H));
+}
 function applySource() {
   if (S.design.source === 'text') buildText(); else renderer.setDesign(media.image || null);
   placeDesign(); updateMediaLabels(); changed();
+}
+// One click to the look of each Figma post (text, layout, aberration, vignette, logo). Size puts the main
+// text at the Figma font size (fraction of the frame's short side), or smaller if it would not fit.
+const EXAMPLES = {
+  gn: { label: 'GN', px: 602.302 / 1350,
+    design: { text: 'GN', above: '', below: '', fill: 'fade', subSize: 20, aboveGap: 20, belowGap: 20, subStrength: 59, x: 50, y: 35.9 },
+    ca: { on: true, mode: 'radial', style: 'spectral', amount: 3, falloff: 1.5 }, grain: { amount: 10 }, look: { on: true }, logo: { on: false } },
+  burned: { label: '6,316,573', px: 164.825 / 675, // Obol Internal 97:47
+    design: { text: '6,316,573', above: '', below: 'OBOL burned', fill: 'solid', subSize: 35, belowGap: 29, subStrength: 59, x: 50.8, y: 35.6 },
+    // fringes measured off the Figma render: blue out, yellow-red in, about 19 px x distance from centre
+    ca: { on: true, mode: 'radial', style: 'rgb', amount: 17.5, falloff: 1 }, grain: { amount: 5 }, look: { on: false }, logo: { on: true, size: 6.1, y: 90.2 } },
+};
+function applyExample(id) {
+  const ex = EXAMPLES[id];
+  Object.assign(S.design, { source: 'text', blend: 'overlay', strength: 170 }, ex.design);
+  S.glow = clone(DEFAULTS.glow);
+  Object.assign(S.ca, ex.ca); Object.assign(S.grain, ex.grain); Object.assign(S.look, ex.look); Object.assign(S.logo, ex.logo);
+  buildText();
+  if (media.text) { const [W, H] = outDims(); S.design.size = Math.min(100, +(100 * ex.px * Math.min(W, H) / media.text.px).toFixed(1)); }
+  updateMediaLabels(); changed();
+  if (ex.logo.on && !media.logo) toast('This post has a logo: add it in the Logo panel');
 }
 function buildTextRows(parent) {
   const r1 = document.createElement('div'); r1.className = 'row tools';
@@ -222,6 +299,16 @@ function buildTextRows(parent) {
   const fb = document.createElement('button'); fb.className = 'ghost'; fb.textContent = 'Load font'; fb.title = 'Pick an .otf / .ttf / .woff file (or drop it on the page). It stays in this browser.';
   fb.addEventListener('click', () => fontInput.click());
   fr.append(fn, fb); r2.appendChild(fr);
+  const er = document.createElement('div'); er.className = 'font-row';
+  const el = document.createElement('span'); el.className = 'font-name'; el.textContent = 'Example';
+  er.appendChild(el);
+  for (const id of Object.keys(EXAMPLES)) {
+    const b = document.createElement('button'); b.className = 'ghost'; b.textContent = EXAMPLES[id].label;
+    b.title = 'Load the ' + EXAMPLES[id].label + ' post from Figma (text, layout, aberration, logo)';
+    b.addEventListener('click', () => applyExample(id));
+    er.appendChild(b);
+  }
+  r2.appendChild(er);
   parent.append(r1, r2);
   controls.push(() => {
     fn.textContent = fontName ? 'Font: ' + fontName : 'Font: Helvetica (load Shin Go or any font)';
@@ -245,7 +332,9 @@ const ICON = {
 const SECTIONS = [
   { key: 'design', title: 'Design', rows: [
     { type: 'custom', build: (p) => buildTextRows(p) },
+    { type: 'segs', segs: [{ key: 'design.fill', opts: [['fade', 'Fade in'], ['solid', 'Solid']] }], show: () => S.design.source === 'text' },
     { type: 'slider', key: 'design.subSize', label: 'Sub size', min: 5, max: 80, step: 1, show: () => S.design.source === 'text' && !!(S.design.above.trim() || S.design.below.trim()) },
+    { type: 'slider', key: 'design.subStrength', label: 'Sub strength', min: 0, max: 100, step: 1, show: () => S.design.source === 'text' && !!(S.design.above.trim() || S.design.below.trim()) },
     { type: 'slider', key: 'design.aboveGap', label: 'Above gap', min: -50, max: 200, step: 1, show: () => S.design.source === 'text' && !!S.design.above.trim() },
     { type: 'slider', key: 'design.belowGap', label: 'Below gap', min: -50, max: 200, step: 1, show: () => S.design.source === 'text' && !!S.design.below.trim() },
     { type: 'segs', segs: [{ key: 'design.blend', opts: [['normal', 'Normal'], ['overlay', 'Overlay'], ['screen', 'Screen'], ['add', 'Add']] }] },
@@ -253,6 +342,11 @@ const SECTIONS = [
     { type: 'slider', key: 'design.size', label: 'Size', min: 5, max: 200, step: 1 },
     { type: 'slider', key: 'design.x', label: 'X', min: 0, max: 100, step: 0.1 },
     { type: 'slider', key: 'design.y', label: 'Y', min: 0, max: 100, step: 0.1 },
+  ] },
+  { key: 'logo', title: 'Logo', toggle: true, rows: [
+    { type: 'custom', build: (p) => buildLogoRow(p) },
+    { type: 'slider', key: 'logo.size', label: 'Size', min: 1, max: 30, step: 0.1 },
+    { type: 'slider', key: 'logo.y', label: 'Y', min: 0, max: 100, step: 0.1 },
   ] },
   { key: 'glow', title: 'Glow', toggle: true, rows: [
     { type: 'slider', key: 'glow.halo', label: 'Halo', min: 0, max: 200, step: 1 },
@@ -397,7 +491,8 @@ function buildSeg(parent, spec, secKey, onChange) {
 function syncSection(key) {
   const el = sectionEls[key]; if (!el) return;
   if (el.sw) el.sw.checked = !!S[key].on;
-  el.root.classList.toggle('off', key === 'design' ? (S.design.source === 'image' && !media.image) : ('on' in S[key] ? !S[key].on : false));
+  el.root.classList.toggle('off', key === 'design' ? (S.design.source === 'image' && !media.image)
+    : key === 'logo' ? (!S.logo.on || !media.logo) : ('on' in S[key] ? !S[key].on : false));
 }
 function syncAll() {
   for (const f of controls) f();
@@ -463,7 +558,10 @@ for (const sec of SECTIONS) {
     const row = document.createElement('div');
     if (r.type === 'custom') { r.build(rows); continue; }
     if (r.type === 'slider') { row.className = 'row'; buildSlider(row, r, sec.key); }
-    else { row.className = 'row tools'; for (const s of r.segs) buildSeg(row, s, sec.key); }
+    else {
+      row.className = 'row tools'; for (const s of r.segs) buildSeg(row, s, sec.key);
+      if (r.show) controls.push(() => row.classList.toggle('hidden', !r.show()));
+    }
     rows.appendChild(row);
   }
   root.append(head, rows);
@@ -483,6 +581,7 @@ side.appendChild(resetAll);
 let saveTimer = null;
 function changed() {
   if (S.design.source === 'text' && textKeyNow() !== textKey) buildText(); // text, subtitles, gaps or format changed
+  renderer.glowScale = glowScaleNow();
   syncAll();
   invalidate();
   updateDesignBox();

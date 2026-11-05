@@ -129,6 +129,9 @@ uniform vec2 uCaDir;
 uniform int uGrOn, uGrMono;
 uniform float uGrAmt, uGrSize;
 uniform uint uSeed;
+uniform sampler2D uLogo;
+uniform int uLogoOn;
+uniform vec4 uLogoRect;      // frame uv: x0, y0, w, h
 out vec4 o;
 
 uvec3 pcg3d(uvec3 v) {
@@ -193,6 +196,11 @@ void main() {
       : vec3(grain(p, cell, uSeed), grain(p, cell, uSeed + 1013u), grain(p, cell, uSeed + 2027u));
     col = clamp(col + n * (uGrAmt * 0.32), 0.0, 1.0);
   }
+  if (uLogoOn == 1) { // on top of everything, clean: no aberration, no grain (like the logo layer in Figma)
+    vec2 d = (p / uRes - uLogoRect.xy) / uLogoRect.zw;
+    vec4 l = texture(uLogo, d) * (step(0.0, d.x) * step(0.0, d.y) * step(d.x, 1.0) * step(d.y, 1.0));
+    col = l.rgb + col * (1.0 - l.a);
+  }
   o = vec4(col, 1.0);
 }`;
 
@@ -228,6 +236,8 @@ export class Renderer {
     this.targets = {};
     // 1x1 transparent stand-in for unused samplers, so no unit is left pointing at a render target
     // (e.g. comp.tex from the last final pass), which WebGL treats as a feedback loop and skips the draw.
+    this.logo = { tex: null, w: 0, h: 0 };
+    this.glowScale = 1; // text mode: blur sizes follow the text size (set by the app)
     this.blank = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.blank);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
@@ -317,6 +327,30 @@ export class Renderer {
     this.design = { tex: t, w: img.naturalWidth || img.width, h: img.naturalHeight || img.height, fit };
   }
 
+  // Logo: image or canvas, drawn last, centred horizontally.
+  setLogo(img) {
+    const gl = this.gl;
+    if (this.logo.tex) { gl.deleteTexture(this.logo.tex); this.logo.tex = null; }
+    if (!img) { this.logo.w = this.logo.h = 0; return; }
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this.logo = { tex: t, w: img.naturalWidth || img.width, h: img.naturalHeight || img.height };
+  }
+  // Logo rect in GL frame uv (size = % of frame height, y = centre % from the top)
+  logoRect(S, W, H) {
+    const h = S.logo.size / 100, w = h * (H / W) * (this.logo.w / Math.max(1, this.logo.h));
+    return [0.5 - w / 2, 1 - S.logo.y / 100 - h / 2, w, h];
+  }
+
   // Design rect in GL frame uv from UI state (x, y = center % from top-left; size = % of frame width)
   designRect(S, W, H) {
     const d = this.design;
@@ -329,7 +363,8 @@ export class Renderer {
 
   _buildGlow(S, W, H, rect, ref) {
     const gl = this.gl;
-    const key = [W, H, rect.join(','), S.glow.haloSize, S.glow.bloomSize, this.design.tex ? 1 : 0].join('|');
+    const gs = this.glowScale || 1;
+    const key = [W, H, rect.join(','), S.glow.haloSize, S.glow.bloomSize, gs, this.design.tex ? 1 : 0].join('|');
     if (key === this.glowKey) return;
     this.glowKey = key;
     const bw = Math.max(4, Math.round(W / 2)), bh = Math.max(4, Math.round(H / 2));
@@ -351,8 +386,8 @@ export class Renderer {
       gl.uniform2f(blur.u.uStep, 0, 1 / A.h);
       this._draw(blur, A);
     };
-    pass(bA, bB, S.glow.bloomSize * ref / 2);
-    pass(hA, hB, S.glow.haloSize * ref / 8);
+    pass(bA, bB, S.glow.bloomSize * gs * ref / 2);
+    pass(hA, hB, S.glow.haloSize * gs * ref / 8);
   }
 
   // q: { scale: render size factor vs canvas, caMaxN, seed }
@@ -417,6 +452,10 @@ export class Renderer {
     gl.uniform1f(f.u.uGrAmt, S.grain.amount / 100);
     gl.uniform1f(f.u.uGrSize, S.grain.size);
     gl.uniform1ui(f.u.uSeed, (q.seed >>> 0) + 1);
+    const logoOn = !!(S.logo && S.logo.on && this.logo.tex);
+    gl.uniform1i(f.u.uLogoOn, logoOn ? 1 : 0);
+    this._bind(f, 'uLogo', 1, logoOn ? this.logo.tex : this.blank);
+    if (logoOn) { const r = this.logoRect(S, W, H); gl.uniform4f(f.u.uLogoRect, r[0], r[1], r[2], r[3]); }
     this._draw(f, null);
   }
 }

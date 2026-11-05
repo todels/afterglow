@@ -22,18 +22,21 @@ The text uses A-OTF Shin Go Pro M. It is a licensed font, so it is not in this r
 2. **Design**, either:
    - **Text** (default): type in the Design panel. It uses the GN setup from the Figma post (A-OTF Shin Go Pro M, tracking -6%, white gradient fading in from the top of each line) and sizes itself: as big as GN in the Figma post, smaller when the text needs it to fit (84% of the width, 66% of the height). Enter makes a new line. Size 100 = auto size, so the Size slider scales relative to that. Without the font the text falls back to Helvetica (see Font).
 
-     **Fill**: Fade in (GN: white fading in from the top) or Solid (the 6,316,573 post).
+     **Fill**: Fade in (GN: white fading in from the top) or Solid (6,316,573, LIVE ON OBOL).
+
+     **Align**: Left, Center or Right. X / Y place the middle of the main text when centred, and its left (or right) edge and cap top when aligned left (right), so a top-left headline grows down and to the right as you type. Switching keeps the text where it is. **Line spacing** (shown for 2+ lines) is baseline to baseline in % of the font size; 99 is the Figma setting.
 
      **Subtitles**: the fields above and below the main text add a line over or under it (solid white, same font, tracking -6%, same glow). They stick to the main text and scale with it. Sub size is a % of the main text size; Above gap / Below gap move each one up or down (in % of the main text size, negative overlaps). Sub strength sets how bright they are next to the main text: 59 matches Figma, where the number has its glow group twice (100% + 70%) and the subtitle once. The whole group counts for the auto size, and X / Y point at the main text.
 
-     **Example**: GN or 6,316,573 loads that Figma post in one click: text, fill, size and position, aberration, grain, vignette and logo. Then type your own text.
+     **Posts**: GN, 6,316,573 or LIVE ON OBOL loads that Figma post in one click: text, fill, alignment, size and position, glow, aberration, grain, vignette, icon and logo settings. Then type your own text. Pictures and logos are not included: add them once (they stay in that browser).
    - **Image**: in Figma, select the layer or frame without its background, Copy as PNG, then press ⌘V here. Dropping a PNG works too. If the design has the same aspect as the output it fills the frame, otherwise it is placed at 60% width.
 
    Drag the design to move it (snaps to center), ⌘ + scroll to scale.
-3. **Logo** (optional): Add logo takes an SVG or PNG (white on transparent). It sits at the bottom centre on top of everything, with no aberration or grain, like the logo layer in the Figma post. Size is % of the frame height. It is stored in that browser.
-4. Tweak the panels. Double-click a slider to reset it.
-5. **Trim** with the two handles on the timeline.
-6. **Export MP4**. Renders every frame at full quality, then downloads.
+3. **Icon** (optional), the LIVE ON OBOL setup: Add picture takes any image (a token, a partner logo). It is cropped round with a feathered edge (Edge, in % of the diameter; Zoom crops into the picture) and blended Hard light like the Figma group. **Badge** adds a pill at its top left (e.g. "5x"): grey to white, black text, soft glow; long text shrinks to fit. Drag the circle on the canvas to move it, ⌘ + scroll to scale. Size is % of the frame height.
+4. **Logo** (optional): Add logo takes an SVG or PNG (white on transparent). It sits at the bottom centre on top of everything, with no aberration or grain, like the logo layer in the Figma post. Size is % of the frame height. It is stored in that browser.
+5. Tweak the panels. Double-click a slider to reset it.
+6. **Trim** with the two handles on the timeline.
+7. **Export MP4**. Renders every frame at full quality, then downloads.
 
 Formats: 16:9 (1920×1080), 1:1, 4:5 (1080×1350), 9:16 (1080×1920). 30 or 60 fps.
 
@@ -58,7 +61,7 @@ Keys: Space play/pause, P toggle Edit/Preview, ⌘V paste design.
 
 It follows the Figma setup the demo design came from: the design is blended over the video (Overlay), then a large blurred copy (Halo) and a small blurred copy (Bloom) are added on top. Amounts above 100% stack a second copy, like duplicating the group in Figma. Blur sizes are Figma blur values at 1080p, so a Figma layer blur of 86 on a 1350 px tall frame is about 69 here.
 
-With text, the blur sizes are for GN-sized text and shrink or grow with the text actually drawn. Both Figma posts use the same ratio (halo blur = 14% of the font size, bloom = 2.2%), so long text or a smaller Size keeps the same look instead of drowning in glow.
+With text, the blur sizes are for GN-sized text and shrink or grow with the text actually drawn (GN and 6,316,573 both use halo blur = 14% of the font size, bloom = 2.2%), so long text or a smaller Size keeps the same look instead of drowning in glow. LIVE ON OBOL blurs a bit more (20% / 3.1%), which its post button sets as Halo size 97, Bloom size 15.
 
 The blurs are cached and only rebuilt when the design, its position or a blur size changes, so playback is cheap (about 2 ms per 1080p frame on an M-series Mac).
 

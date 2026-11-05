@@ -50,7 +50,7 @@ void main() {
 const FS_COMP = `#version 300 es
 precision highp float;
 in vec2 vUv;
-uniform sampler2D uBg, uDesign, uBloom, uHalo;
+uniform sampler2D uBg, uDesign, uBloom, uHalo, uIcon;
 uniform vec2 uRes, uBgSize;
 uniform vec3 uBgX;          // zoom, panX, panY (-1..1)
 uniform int uHasBg, uHasDesign;
@@ -62,12 +62,15 @@ uniform float uHaloAmt, uBloomAmt;
 uniform float uExposure, uContrast, uSat;
 uniform int uVigOn;
 uniform float uVig, uVigStart;
+uniform int uIconOn, uIconBlend;
+uniform vec4 uIconRect;
 out vec4 o;
 
 vec3 blendOf(vec3 b, vec3 s, int m) {
   if (m == 0) return s;
-  if (m == 1) return mix(2.0 * b * s, 1.0 - 2.0 * (1.0 - b) * (1.0 - s), step(0.5, b));
+  if (m == 1) return mix(2.0 * b * s, 1.0 - 2.0 * (1.0 - b) * (1.0 - s), step(0.5, b)); // overlay
   if (m == 2) return 1.0 - (1.0 - b) * (1.0 - s);
+  if (m == 4) return mix(2.0 * b * s, 1.0 - 2.0 * (1.0 - b) * (1.0 - s), step(0.5, s)); // hard light
   return b + s;
 }
 vec3 layer(vec3 b, vec4 p, float amt, int m) {
@@ -106,6 +109,11 @@ void main() {
         c = min(c + bl * (uBloomAmt * 0.5), 1.0);
       }
     }
+  }
+  if (uIconOn == 1) { // icon group (picture + badge), above the text like in Figma
+    vec2 d = (uv - uIconRect.xy) / uIconRect.zw;
+    vec4 p = texture(uIcon, d) * (step(0.0, d.x) * step(0.0, d.y) * step(d.x, 1.0) * step(d.y, 1.0));
+    c = layer(c, p, 1.0, uIconBlend);
   }
   if (uVigOn == 1 && uVig > 0.0) {
     vec2 q = (uv - 0.5) * vec2(uRes.x / uRes.y, 1.0);
@@ -220,7 +228,7 @@ function compile(gl, fs) {
   return { p, u };
 }
 
-const BLEND = { normal: 0, overlay: 1, screen: 2, add: 3 };
+const BLEND = { normal: 0, overlay: 1, screen: 2, add: 3, hardlight: 4 };
 
 export class Renderer {
   constructor(canvas) {
@@ -237,6 +245,8 @@ export class Renderer {
     // 1x1 transparent stand-in for unused samplers, so no unit is left pointing at a render target
     // (e.g. comp.tex from the last final pass), which WebGL treats as a feedback loop and skips the draw.
     this.logo = { tex: null, w: 0, h: 0 };
+    this.icon = { tex: null };
+    this.iconRect = [0, 0, 1, 1]; // GL frame uv, set by the app
     this.glowScale = 1; // text mode: blur sizes follow the text size (set by the app)
     this.blank = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.blank);
@@ -308,7 +318,8 @@ export class Renderer {
 
   // Design: image or canvas (transparent). Premultiplied + mipmapped.
   // fit = frame-width fraction the design covers at size 100 (1 for images, auto-fit width for text).
-  setDesign(img, fit = 1) {
+  // anchor = the point of the image that X / Y place (fractions from its top-left), centre by default.
+  setDesign(img, fit = 1, anchor = [0.5, 0.5]) {
     const gl = this.gl;
     if (this.design.tex) { gl.deleteTexture(this.design.tex); this.design.tex = null; }
     this.glowKey = '';
@@ -324,7 +335,7 @@ export class Renderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    this.design = { tex: t, w: img.naturalWidth || img.width, h: img.naturalHeight || img.height, fit };
+    this.design = { tex: t, w: img.naturalWidth || img.width, h: img.naturalHeight || img.height, fit, anchor };
   }
 
   // Logo: image or canvas, drawn last, centred horizontally.
@@ -345,6 +356,24 @@ export class Renderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     this.logo = { tex: t, w: img.naturalWidth || img.width, h: img.naturalHeight || img.height };
   }
+  // Icon group: canvas built by the app (picture, round feathered mask, badge), placed at iconRect.
+  setIcon(img) {
+    const gl = this.gl;
+    if (this.icon.tex) { gl.deleteTexture(this.icon.tex); this.icon.tex = null; }
+    if (!img) return;
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this.icon = { tex: t };
+  }
   // Logo rect in GL frame uv (size = % of frame height, y = centre % from the top)
   logoRect(S, W, H) {
     const h = S.logo.size / 100, w = h * (H / W) * (this.logo.w / Math.max(1, this.logo.h));
@@ -357,8 +386,9 @@ export class Renderer {
     if (!d.tex) return [0, 0, 1, 1];
     const w = S.design.size / 100 * (d.fit || 1);
     const h = w * (W / H) / (d.w / d.h);
-    const cx = S.design.x / 100, cy = 1 - S.design.y / 100;
-    return [cx - w / 2, cy - h / 2, w, h];
+    const [ax, ay] = d.anchor || [0.5, 0.5];
+    const top = S.design.y / 100 - ay * h; // y down
+    return [S.design.x / 100 - ax * w, 1 - top - h, w, h];
   }
 
   _buildGlow(S, W, H, rect, ref) {
@@ -408,6 +438,14 @@ export class Renderer {
     this._bind(c, 'uDesign', 1, this.blank);
     this._bind(c, 'uBloom', 2, this.blank);
     this._bind(c, 'uHalo', 3, this.blank);
+    this._bind(c, 'uIcon', 4, this.blank);
+    const iconOn = !!(S.icon && S.icon.on && this.icon.tex);
+    gl.uniform1i(c.u.uIconOn, iconOn ? 1 : 0);
+    if (iconOn) {
+      this._bind(c, 'uIcon', 4, this.icon.tex);
+      const r = this.iconRect; gl.uniform4f(c.u.uIconRect, r[0], r[1], r[2], r[3]);
+      gl.uniform1i(c.u.uIconBlend, BLEND[S.icon.blend] ?? 4);
+    }
     gl.uniform2f(c.u.uBgSize, this.bg.w || 1, this.bg.h || 1);
     gl.uniform3f(c.u.uBgX, S.video.zoom / 100, S.video.panX / 100, -S.video.panY / 100);
     gl.uniform1f(c.u.uExposure, S.video.exposure / 100);

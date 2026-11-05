@@ -90,6 +90,7 @@ function idb() {
 }
 async function idbGet(k) { const db = await idb(); return new Promise((res, rej) => { const q = db.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); }
 async function idbPut(k, v) { const db = await idb(); return new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => res(); t.onerror = () => rej(t.error); }); }
+const withTimeout = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r(null), ms))]);
 const fontReady = (async () => {
   const sources = [
     async () => { const rec = await idbGet('font'); return rec ? [rec.buf.slice(0), rec.name] : null; }, // font the user dropped
@@ -97,7 +98,7 @@ const fontReady = (async () => {
     async () => ['local("ShinGoPro-Medium"), local("A-OTF Shin Go Pro M")', 'Shin Go Pro M'], // installed on this machine
   ];
   for (const get of sources) {
-    try { const v = await get(); if (v && await useFontSource(v[0], v[1])) return true; } catch (e) {}
+    try { const v = await withTimeout(get(), 3000); if (v && await withTimeout(useFontSource(v[0], v[1]), 3000)) return true; } catch (e) {} // a stuck source (IndexedDB, local()) must not block the next
   }
   return false;
 })();
@@ -968,9 +969,9 @@ updateMediaLabels();
 setMode('edit');
 layout();
 loadDemo();
-fontReady.then((ok) => {
-  if (S.design.source === 'text') buildText();
-  updateMediaLabels(); changed();
-});
+// Never hold the text back for the font: draw with the fallback after a short wait, swap when it arrives.
+const showText = () => { if (S.design.source === 'text') buildText(); updateMediaLabels(); changed(); };
+withTimeout(fontReady, 800).then(showText);
+fontReady.then(showText);
 
 window.afterglow = { get S() { return S; }, set S(v) { S = merge(DEFAULTS, v); changed(); }, textCanvas, buildText, setDesign, applySource, renderer, media, clip, setMode, exportMP4, draw, video };

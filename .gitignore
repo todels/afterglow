@@ -1,0 +1,7 @@
+# Licensed font (A-OTF Shin Go Pro, Morisawa): local use only, never commit or publish.
+# On the live site, load it with "Load font" (stays in that browser).
+fonts/
+# Only the demo video is public; the Figma reference images stay local.
+demo/*
+!demo/demo.mp4
+.DS_Store

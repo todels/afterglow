@@ -24,7 +24,7 @@ The text uses A-OTF Shin Go Pro M. It is a licensed font, so it is not in this r
 
      **Fill**: Fade in (GN: white fading in from the top) or Solid (6,316,573, LIVE ON OBOL).
 
-     **Align**: Left, Center or Right. X / Y place the middle of the main text when centred, and its left (or right) edge and cap top when aligned left (right), so a top-left headline grows down and to the right as you type. Switching keeps the text where it is. **Line spacing** (shown for 2+ lines) is baseline to baseline in % of the font size; 99 is the Figma setting.
+     **Align**: Left, Center or Right. X / Y place the middle of the main text when centred, and its left (or right) edge and cap top when aligned left (right), so a top-left headline grows down and to the right as you type. Switching keeps the text where it is. **Line spacing** (shown for 2+ lines) is baseline to baseline in % of the font size; 99 is the Figma setting. **Pin** (Top / Middle / Bottom) is the part of the main text that stays put when lines are added: Top grows down, Bottom grows up (use it for text placed low in the frame, so a client's second line pushes the text up instead of off the bottom), Middle grows both ways.
 
      **Subtitles**: the fields above and below the main text add a line over or under it (solid white, same font, tracking -6%, same glow). They stick to the main text and scale with it. Sub size is a % of the main text size; Above gap / Below gap move each one up or down (in % of the main text size, negative overlaps). Sub strength sets how bright they are next to the main text: 59 matches Figma, where the number has its glow group twice (100% + 70%) and the subtitle once. The whole group counts for the auto size, and X / Y point at the main text.
 

@@ -15,7 +15,7 @@ if (CLIENT) document.body.classList.add('shared');
 
 const DEFAULTS = {
   format: '16:9', fps: 30, audio: true, quality: 'high',
-  design: { source: 'text', text: 'GN', above: '', below: '', fill: 'fade', align: 'center', leading: 99, subSize: 20, aboveGap: 20, belowGap: 20, subStrength: 59, blend: 'overlay', strength: 170, size: 100, x: 50, y: 35.9 },
+  design: { source: 'text', text: 'GN', above: '', below: '', fill: 'fade', align: 'center', valign: 'auto', leading: 99, subSize: 20, aboveGap: 20, belowGap: 20, subStrength: 59, blend: 'overlay', strength: 170, size: 100, x: 50, y: 35.9 },
   glow:   { on: true, halo: 170, haloSize: 69, haloBlend: 'overlay', bloom: 120, bloomSize: 10.5 },
   ca:     { on: true, mode: 'radial', style: 'spectral', amount: 3, falloff: 1.5, angle: 0 },
   grain:  { on: true, amount: 10, size: 1, color: 'mono', motion: 'moving' },
@@ -409,9 +409,9 @@ function textCanvas(d, W, H) {
   const lay = layoutText(d, P);
   const main = lay.items.find((it) => it.main);
   const mw = main ? main.m.width : 0, mh = main ? main.m.height : 0;
-  const al = d.align || 'center';
+  const al = d.align || 'center', va = vOf(d);
   const ax = al === 'left' ? -mw / 2 : al === 'right' ? mw / 2 : 0; // anchor, relative to the main text centre
-  const ay = al === 'center' ? 0 : -mh / 2;
+  const ay = va === 'top' ? -mh / 2 : va === 'bottom' ? mh / 2 : 0; // cap top of the first line / middle / baseline of the last
   const lineX = (w) => (al === 'left' ? -mw / 2 : al === 'right' ? mw / 2 - w : -w / 2); // line start, same frame
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   for (const it of lay.items) {
@@ -441,20 +441,27 @@ function textCanvas(d, W, H) {
   const k = 1 / TXT.ss; // canvas px -> output px
   return { canvas: cv, fit: cw / (W * TXT.ss), px: auto, anchor: [(ox + ax) / cw, (oy + ay) / ch], mw: mw * k, mh: mh * k };
 }
-// Offset of an alignment's anchor from the main text centre, for the text as placed now (% of frame).
-function alignOffset(align) {
+// Pin: which part of the main text stays put when lines are added. Top grows down, Bottom grows up (for
+// text placed low in the frame), Middle grows both ways. 'auto' = Middle when centred, else Top.
+const vOf = (d) => (d.valign && d.valign !== 'auto' ? d.valign : d.align === 'center' ? 'middle' : 'top');
+// Offset of an anchor from the main text centre, for the text as placed now (% of frame).
+function alignOffset(align, va = vOf(Object.assign({}, S.design, { align }))) {
   const t = media.text; if (!t) return [0, 0];
   const [W, H] = outDims(), sz = S.design.size / 100;
   const hw = t.mw * sz / W * 50, hh = t.mh * sz / H * 50;
-  return [align === 'left' ? -hw : align === 'right' ? hw : 0, align === 'center' ? 0 : -hh];
+  return [align === 'left' ? -hw : align === 'right' ? hw : 0, va === 'top' ? -hh : va === 'bottom' ? hh : 0];
 }
+function moveAnchor(a, b) { S.design.x = +(S.design.x - a[0] + b[0]).toFixed(2); S.design.y = +(S.design.y - a[1] + b[1]).toFixed(2); }
 function setAlign(al, prev) { // keep the main text where it is
-  const a = alignOffset(prev), b = alignOffset(al);
-  S.design.x = +(S.design.x - a[0] + b[0]).toFixed(2); S.design.y = +(S.design.y - a[1] + b[1]).toFixed(2);
+  moveAnchor(alignOffset(prev), alignOffset(al));
   S.design.align = al; changed();
 }
+function setVAlign(va, prev) {
+  moveAnchor(alignOffset(S.design.align, prev), alignOffset(S.design.align, va));
+  S.design.valign = va; changed();
+}
 let textKey = '';
-const textKeyNow = () => { const d = S.design; return [S.format, d.text, d.above, d.below, d.fill, d.align, d.leading, d.subSize, d.aboveGap, d.belowGap, d.subStrength, textFamily].join('\u0001'); };
+const textKeyNow = () => { const d = S.design; return [S.format, d.text, d.above, d.below, d.fill, d.align, d.valign, d.leading, d.subSize, d.aboveGap, d.belowGap, d.subStrength, textFamily].join('\u0001'); };
 function buildText() {
   const [W, H] = outDims();
   textKey = textKeyNow();
@@ -490,7 +497,7 @@ const EXAMPLES = {
 };
 function applyExample(id) {
   const ex = EXAMPLES[id];
-  Object.assign(S.design, { source: 'text', blend: 'overlay', strength: 170 }, ex.design);
+  Object.assign(S.design, { source: 'text', blend: 'overlay', strength: 170, valign: 'auto' }, ex.design);
   S.glow = Object.assign(clone(DEFAULTS.glow), ex.glow || {});
   for (const k of ['ca', 'grain', 'look', 'logo', 'icon', 'icon2']) Object.assign(S[k], ex[k] || {});
   buildText();
@@ -562,6 +569,7 @@ const SECTIONS = [
   { key: 'design', title: 'Design', rows: [
     { type: 'custom', build: (p) => buildTextRows(p) },
     { type: 'segs', segs: [{ key: 'design.fill', opts: [['fade', 'Fade in'], ['solid', 'Solid']] }, { key: 'design.align', opts: [['left', 'Left'], ['center', 'Center'], ['right', 'Right']], onChange: setAlign }], show: () => S.design.source === 'text' },
+    { type: 'segs', label: 'Pin', title: 'Which part of the text stays put when lines are added. Bottom: new lines push the text up.', segs: [{ key: 'design.valign', get: () => vOf(S.design), opts: [['top', 'Top'], ['middle', 'Middle'], ['bottom', 'Bottom']], onChange: setVAlign }], show: () => S.design.source === 'text' },
     { type: 'slider', key: 'design.leading', label: 'Line spacing', min: 60, max: 160, step: 1, show: () => S.design.source === 'text' && S.design.text.trim().includes('\n') },
     { type: 'slider', key: 'design.subSize', label: 'Sub size', min: 5, max: 80, step: 1, show: () => S.design.source === 'text' && !!(S.design.above.trim() || S.design.below.trim()) },
     { type: 'slider', key: 'design.subStrength', label: 'Sub strength', min: 0, max: 100, step: 1, show: () => S.design.source === 'text' && !!(S.design.above.trim() || S.design.below.trim()) },
@@ -707,7 +715,7 @@ function buildSeg(parent, spec, secKey, onChange) {
   const btns = spec.opts.map(([v, label]) => {
     const b = document.createElement('button'); b.textContent = label; b.dataset.v = v;
     b.addEventListener('click', () => {
-      const prev = getP(spec.key);
+      const prev = spec.get ? spec.get() : getP(spec.key);
       if (prev === v) return;
       setP(spec.key, v);
       if (secKey && S[secKey] && 'on' in S[secKey]) S[secKey].on = true;
@@ -717,7 +725,7 @@ function buildSeg(parent, spec, secKey, onChange) {
     seg.appendChild(b); return b;
   });
   parent.appendChild(seg);
-  controls.push(() => btns.forEach((b) => b.classList.toggle('on', String(b.dataset.v) === String(getP(spec.key)))));
+  controls.push(() => { const cur = spec.get ? spec.get() : getP(spec.key); btns.forEach((b) => b.classList.toggle('on', String(b.dataset.v) === String(cur))); });
   return seg;
 }
 
@@ -793,7 +801,9 @@ for (const sec of SECTIONS) {
     if (r.type === 'custom') { r.build(rows); continue; }
     if (r.type === 'slider') { row.className = 'row'; buildSlider(row, r, sec.key); }
     else {
-      row.className = 'row tools'; for (const s of r.segs) buildSeg(row, s, sec.key, s.onChange);
+      row.className = 'row tools';
+      if (r.label) { const l = document.createElement('span'); l.className = 'seg-label'; l.textContent = r.label; if (r.title) l.title = r.title; row.appendChild(l); }
+      for (const s of r.segs) buildSeg(row, s, sec.key, s.onChange);
       if (r.show) controls.push(() => row.classList.toggle('hidden', !r.show()));
     }
     rows.appendChild(row);

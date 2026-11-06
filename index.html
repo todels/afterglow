@@ -104,14 +104,18 @@ main { flex: 1; min-height: 0; display: flex; }
 .sh-files { color: var(--faint); line-height: 1.4; margin-bottom: 12px; }
 .sh-status { margin-bottom: 12px; color: var(--muted); }
 .sh-status .progress { margin-bottom: 6px; }
-.sh-list-h { font-weight: 600; margin: 4px 0 6px; padding-top: 12px; border-top: 1px solid var(--line); }
+.sh-step { padding-top: 12px; margin-top: 4px; border-top: 1px solid var(--line); }
+.sh-step-h { font-weight: 600; margin-bottom: 4px; }
+.sh-step-h span { font-weight: 400; color: var(--faint); margin-left: 6px; }
+.sh-step .sh-note { margin: 0 0 10px; }
+.sh-step .sh-login { margin-bottom: 10px; }
 .sh-list { display: flex; flex-direction: column; gap: 2px; margin: 0 -6px 10px; }
 .sh-list .pre .ghost { height: 24px; padding: 0 8px; }
 .sh-list .pre .ghost.arm { color: var(--danger); border-color: var(--danger); }
 .sh-foot { display: flex; align-items: center; justify-content: space-between; color: var(--faint); }
 .sh-foot .ghost { height: 24px; }
 /* a client's view of a shared template: only the text */
-body.shared .side > :not(.client), body.shared .design-box, body.shared .trim, body.shared #hints, body.shared .drop { display: none !important; }
+body.shared .side > :not(.client), body.shared .design-box, body.shared .trim, body.shared #hints, body.shared .drop, body.shared #shareBtn { display: none !important; }
 .client-note { color: var(--muted); margin: 0 0 8px; line-height: 1.4; }
 .client-label { color: var(--muted); margin-bottom: -2px; }
 

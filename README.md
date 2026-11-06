@@ -48,24 +48,32 @@ Presets live in that browser (IndexedDB), not on the site, so they do not move b
 
 Formats: 16:9 (1920×1080), 1:1, 4:5 (1080×1350), 9:16 (1080×1920). 30 or 60 fps.
 
-## Share links
+## Share as a template
 
-**Share** (top right) turns what is on screen into a template link for a client. The link opens this post with the video, font, pictures, logo, trim and every setting. The client can only change the text (main text, the lines above / below if the template has them, badges), then Export MP4. Nothing else is editable. Their text stays in their browser, so a reload keeps it.
+**Share** (top right) hands a client this post with the video, font, pictures, logo, trim and every setting. The client can only change the text (main text, the lines above / below if the template has them, badges), then Export MP4. Their text stays in their browser, so a reload keeps it.
 
-- **Create link** uploads the files and gives a new link (copied right away).
-- **Update** (click twice) replaces a link's template with what is on screen now. Same link, so the client just reloads.
-- **×** (click twice) deletes a link. It stops working, and files no other link uses are deleted.
-- Each file is uploaded once: ten links on the same video store it once.
-- **Include the font file** uploads the font so the client sees it. Anyone with the link can download that file, so only do this if the font license allows it. A font that is only installed on your computer cannot be uploaded: use Load font with the file.
+**Template file** (works now, no account):
 
-Files go to a Supabase Storage bucket. Setup, once (free plan is enough; 50 MB per file):
+1. Share > **Download template file**. You get one `.afterglow` file with everything inside.
+2. Send the client that file (WeTransfer, Slack, email) and the link https://todels.github.io/afterglow/?open (Copy link in the dialog).
+3. They open the link, drop the file on the page (or Choose file), change the text and export.
+
+Dropping a `.afterglow` file on the editor opens it the same way (text only). Go back to https://todels.github.io/afterglow/ for the full editor.
+
+**Include the font file** puts the font in the template so the client sees it. The client can get the font file out of it, so only do this if the font license allows it. A font that is only installed on your computer cannot be included: use Load font with the file.
+
+### Link only (optional, needs Supabase)
+
+With a Supabase project connected, Share also makes a plain link (`?s=…`), no file to send. **Update** (click twice) replaces a link's template with what is on screen now (same link, the client reloads), **×** (click twice) deletes it and the files no other link uses. Each file is uploaded once.
+
+Setup, once (free plan is enough; 50 MB per file):
 
 1. Create a project at [supabase.com](https://supabase.com).
 2. SQL Editor: paste `supabase-setup.sql`, replace `you@example.com` with your email, run it.
 3. Authentication > Users > Add user: your email and a password (Auto Confirm on). Then Authentication > Sign In / Providers: turn off "Allow new users to sign up".
 4. Project Settings > API Keys: put the project URL and the publishable (or anon) key in `share-config.js` and push. That key is meant to be public; uploads still need your login.
 
-Then click Share and sign in with that email and password (it stays signed in in that browser).
+Then Share > sign in with that email and password (it stays signed in in that browser).
 
 ## Export quality
 

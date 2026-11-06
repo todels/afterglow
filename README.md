@@ -48,6 +48,25 @@ Presets live in that browser (IndexedDB), not on the site, so they do not move b
 
 Formats: 16:9 (1920×1080), 1:1, 4:5 (1080×1350), 9:16 (1080×1920). 30 or 60 fps.
 
+## Share links
+
+**Share** (top right) turns what is on screen into a template link for a client. The link opens this post with the video, font, pictures, logo, trim and every setting. The client can only change the text (main text, the lines above / below if the template has them, badges), then Export MP4. Nothing else is editable. Their text stays in their browser, so a reload keeps it.
+
+- **Create link** uploads the files and gives a new link (copied right away).
+- **Update** (click twice) replaces a link's template with what is on screen now. Same link, so the client just reloads.
+- **×** (click twice) deletes a link. It stops working, and files no other link uses are deleted.
+- Each file is uploaded once: ten links on the same video store it once.
+- **Include the font file** uploads the font so the client sees it. Anyone with the link can download that file, so only do this if the font license allows it. A font that is only installed on your computer cannot be uploaded: use Load font with the file.
+
+Files go to a Supabase Storage bucket. Setup, once (free plan is enough; 50 MB per file):
+
+1. Create a project at [supabase.com](https://supabase.com).
+2. SQL Editor: paste `supabase-setup.sql`, replace `you@example.com` with your email, run it.
+3. Authentication > Users > Add user: your email and a password (Auto Confirm on). Then Authentication > Sign In / Providers: turn off "Allow new users to sign up".
+4. Project Settings > API Keys: put the project URL and the publishable (or anon) key in `share-config.js` and push. That key is meant to be public; uploads still need your login.
+
+Then click Share and sign in with that email and password (it stays signed in in that browser).
+
 ## Export quality
 
 Export uses constant quality, not a target bitrate. Fine moving grain is close to random noise, and bitrate-targeted encoders smear it into flat blotches after a few frames. So file size depends on how much grain there is:

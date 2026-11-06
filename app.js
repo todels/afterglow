@@ -1,5 +1,10 @@
 import { Renderer } from './gl.js';
 import { Muxer, ArrayBufferTarget } from './vendor/mp4-muxer.mjs';
+import { SHARE } from './share-config.js';
+
+// ?s=<id> opens a shared template: everything locked except the text, nothing saved in this browser.
+const SHARE_ID = (new URLSearchParams(location.search).get('s') || '').replace(/[^A-Za-z0-9]/g, '');
+if (SHARE_ID) document.body.classList.add('shared');
 
 // ------------------------------------------------------------------ state
 
@@ -30,7 +35,7 @@ function merge(base, over) {
 }
 let S = clone(DEFAULTS);
 let savedHadSource = false;
-try {
+if (!SHARE_ID) try {
   const saved = JSON.parse(localStorage.getItem('afterglow.settings') || 'null');
   S = merge(DEFAULTS, saved);
   savedHadSource = !!(saved && saved.design && 'source' in saved.design);
@@ -82,12 +87,14 @@ function faceDraws(fam) {
   const w = (f) => { c.font = '100px ' + f; return c.measureText(s).width; };
   return w(fam + ', monospace') !== w('monospace') && w(fam + ', serif') !== w('serif');
 }
+let fontBytes = null, fontBlob = null; // the current font file, when it came from a file (not local())
 async function useFontSource(src, name) {
+  const keep = typeof src === 'string' ? null : src.slice(0);
   const fam = TXT.face + (++fontSeq);
   const ff = new FontFace(fam, src);
   await ff.load(); document.fonts.add(ff);
   if (!faceDraws(fam)) { document.fonts.delete(ff); return false; }
-  textFamily = fam + ', ' + FALLBACK; fontName = name; return true;
+  textFamily = fam + ', ' + FALLBACK; fontName = name; fontBytes = keep; fontBlob = null; return true;
 }
 // Fonts dropped by the user live only in this browser (IndexedDB); Shin Go is licensed and never deployed.
 // Stores: kv (current font / logo / icons), presets (by name), media (blobs by content hash, shared by presets).
@@ -119,7 +126,7 @@ const fontReady = (async () => {
     async () => { const rec = await idbGet('font'); return rec ? [rec.buf.slice(0), rec.name] : null; }, // font the user dropped
     async () => { const r = await fetch('fonts/AOTFShinGoProMedium.otf'); return r.ok ? [await r.arrayBuffer(), 'Shin Go Pro M'] : null; }, // local copy (gitignored)
     async () => ['local("ShinGoPro-Medium"), local("A-OTF Shin Go Pro M")', 'Shin Go Pro M'], // installed on this machine
-  ];
+  ].slice(SHARE_ID ? 2 : 0); // a shared template brings its own font
   for (const get of sources) {
     try { const v = await withTimeout(get(), 3000); if (v && await withTimeout(useFontSource(v[0], v[1]), 3000)) return true; } catch (e) {} // a stuck source (IndexedDB, local()) must not block the next
   }
@@ -179,7 +186,7 @@ function buildLogoRow(parent) {
   };
   updateLogoLabel();
 }
-idbGet('logo').then((rec) => { if (rec && rec.blob) useLogo(rec.blob, rec.name, false); }).catch(() => {});
+if (!SHARE_ID) idbGet('logo').then((rec) => { if (rec && rec.blob) useLogo(rec.blob, rec.name, false); }).catch(() => {});
 // ------------------------------------------------------------------ icon (picture + badge)
 // LIVE ON OBOL (Obol Internal 128:120): a round picture with a feathered edge and a "5x" badge at its top
 // left, all in one Hard light group above the text. Everything is in fractions of the picture diameter D,
@@ -335,7 +342,7 @@ function buildIconRows(parent, k) {
   controls.push(() => { if (document.activeElement !== bi && bi.value !== S[k].badge) bi.value = S[k].badge; });
   o.label();
 }
-for (const k of ICON_KEYS) idbGet(k).then((rec) => { if (rec && rec.blob) useIcon(k, rec.blob, rec.name, false); }).catch(() => {});
+if (!SHARE_ID) for (const k of ICON_KEYS) idbGet(k).then((rec) => { if (rec && rec.blob) useIcon(k, rec.blob, rec.name, false); }).catch(() => {});
 
 const fontInput = document.createElement('input');
 fontInput.type = 'file'; fontInput.accept = '.otf,.ttf,.woff,.woff2'; fontInput.hidden = true;
@@ -809,7 +816,7 @@ function changed() {
   invalidate();
   updateDesignBox();
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => { try { localStorage.setItem('afterglow.settings', JSON.stringify(S)); } catch (e) {} }, 300);
+  if (!SHARE_ID) saveTimer = setTimeout(() => { try { localStorage.setItem('afterglow.settings', JSON.stringify(S)); } catch (e) {} }, 300);
 }
 
 // ------------------------------------------------------------------ media
@@ -913,6 +920,7 @@ window.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth =
 window.addEventListener('dragover', (e) => e.preventDefault());
 window.addEventListener('drop', (e) => {
   e.preventDefault(); dragDepth = 0; document.body.classList.remove('dragging');
+  if (SHARE_ID) return;
   for (const f of e.dataTransfer.files) {
     if (isFontFile(f)) loadFontFile(f);
     else if (f.type.startsWith('video/')) setVideoFile(f);
@@ -920,6 +928,7 @@ window.addEventListener('drop', (e) => {
   }
 });
 window.addEventListener('paste', (e) => {
+  if (SHARE_ID) return;
   const inField = e.target.closest && e.target.closest('textarea, input');
   if (inField && [...e.clipboardData.items].some((it) => it.type === 'text/plain')) return; // typing text
   for (const it of e.clipboardData.items) {
@@ -1304,7 +1313,7 @@ async function exportMP4() {
     const blob = new Blob([target.buffer], { type: 'video/mp4' });
     const a = document.createElement('a');
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-    a.href = URL.createObjectURL(blob); a.download = 'afterglow-' + stamp + '.mp4';
+    a.href = URL.createObjectURL(blob); a.download = (shareName ? shareName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'afterglow' : 'afterglow') + '-' + stamp + '.mp4';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 30000);
     window.__lastExport = { bytes: blob.size, frames: N, ms: Math.round(performance.now() - started), audio: !!audio, codec, qp: vc.qp, mbps: +(blob.size * 8 / (t1 - t0) / 1e6).toFixed(1) };
@@ -1491,19 +1500,334 @@ function buildPresets() {
   };
   refreshPresets();
 }
-buildPresets();
+if (!SHARE_ID) buildPresets();
+
+// ------------------------------------------------------------------ share links
+// Owner: Share uploads the files (once each, by content hash, to m/<hash>) and a manifest (s/<id>.json) to a
+// Supabase Storage bucket and gives a link. Client (?s=<id>): the template loads with everything locked
+// except the text, and can export. Uploads need the owner's Supabase login; reading is public by exact path.
+
+const SB = (() => { // localStorage override is for local testing against a stand-in server
+  try { const o = JSON.parse(localStorage.getItem('afterglow.shareApi') || 'null'); if (o && o.url) return o; } catch (e) {}
+  return SHARE;
+})();
+const shareOn = !!(SB && SB.url && SB.key);
+const sbBase = shareOn ? SB.url.replace(/\/+$/, '') : '';
+const BUCKET = (SB && SB.bucket) || 'afterglow';
+const pubUrl = (path) => sbBase + '/storage/v1/object/public/' + BUCKET + '/' + path;
+let shareName = ''; // template name in a shared view (export file name)
+let sbAuth = null;
+try { sbAuth = JSON.parse(localStorage.getItem('afterglow.shareAuth') || 'null'); } catch (e) {}
+function saveAuth(a) { sbAuth = a; try { if (a) localStorage.setItem('afterglow.shareAuth', JSON.stringify(a)); else localStorage.removeItem('afterglow.shareAuth'); } catch (e) {} }
+async function sbJson(r) {
+  let j = null; try { j = await r.json(); } catch (e) {}
+  if (!r.ok) { const err = new Error((j && (j.error_description || j.msg || j.message || j.error)) || 'HTTP ' + r.status); err.status = r.status; throw err; }
+  return j;
+}
+const authFrom = (j, email) => ({ access: j.access_token, refresh: j.refresh_token, exp: j.expires_at || Math.floor(Date.now() / 1000) + (j.expires_in || 3600), email: (j.user && j.user.email) || email });
+async function sbSignIn(email, password) {
+  const j = await sbJson(await fetch(sbBase + '/auth/v1/token?grant_type=password', { method: 'POST', headers: { apikey: SB.key, 'content-type': 'application/json' }, body: JSON.stringify({ email, password }) }));
+  saveAuth(authFrom(j, email));
+}
+async function sbToken() {
+  if (!sbAuth) throw new Error('Sign in first');
+  if (sbAuth.exp - 60 < Date.now() / 1000) {
+    try {
+      const j = await sbJson(await fetch(sbBase + '/auth/v1/token?grant_type=refresh_token', { method: 'POST', headers: { apikey: SB.key, 'content-type': 'application/json' }, body: JSON.stringify({ refresh_token: sbAuth.refresh }) }));
+      saveAuth(authFrom(j, sbAuth.email));
+    } catch (e) { saveAuth(null); throw new Error('Signed out, sign in again'); }
+  }
+  return sbAuth.access;
+}
+const sbHeaders = async (extra) => Object.assign({ apikey: SB.key, authorization: 'Bearer ' + await sbToken() }, extra || {});
+async function sbList(prefix, search) {
+  return sbJson(await fetch(sbBase + '/storage/v1/object/list/' + BUCKET, { method: 'POST', headers: await sbHeaders({ 'content-type': 'application/json' }),
+    body: JSON.stringify({ prefix, search: search || '', limit: 1000, offset: 0, sortBy: { column: 'name', order: 'asc' } }) }));
+}
+async function sbUpload(path, blob, { upsert = false, cache = 31536000, onProgress } = {}) {
+  const h = await sbHeaders({ 'content-type': blob.type || 'application/octet-stream', 'cache-control': 'max-age=' + cache, 'x-upsert': upsert ? 'true' : 'false' });
+  return new Promise((res, rej) => {
+    const x = new XMLHttpRequest();
+    x.open('POST', sbBase + '/storage/v1/object/' + BUCKET + '/' + path);
+    for (const k in h) x.setRequestHeader(k, h[k]);
+    if (onProgress) x.upload.onprogress = (e) => onProgress(e.loaded);
+    x.onload = () => {
+      if (x.status < 300) { res(); return; }
+      let m = 'HTTP ' + x.status; try { const j = JSON.parse(x.responseText); m = j.message || j.error || m; } catch (e) {}
+      if (x.status === 413 || /too large|exceeded the maximum/i.test(m)) m = 'file is bigger than the storage limit (' + fmtMB(blob.size) + '; free Supabase takes 50 MB per file)';
+      else if (/row-level security|unauthorized/i.test(m)) m = 'the storage rules refused it (does the email in supabase-setup.sql match your login?)';
+      const err = new Error(m); err.status = x.status; rej(err);
+    };
+    x.onerror = () => rej(new Error('network error'));
+    x.send(blob);
+  });
+}
+async function sbRemove(paths) {
+  if (paths.length) await sbJson(await fetch(sbBase + '/storage/v1/object/' + BUCKET, { method: 'DELETE', headers: await sbHeaders({ 'content-type': 'application/json' }), body: JSON.stringify({ prefixes: paths }) }));
+}
+async function fetchBlob(url, type, onProgress) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('a file of this template is missing (HTTP ' + r.status + ')');
+  type = type || r.headers.get('content-type') || '';
+  if (!r.body || !onProgress) return new Blob([await r.arrayBuffer()], { type });
+  const rd = r.body.getReader(), parts = []; let n = 0;
+  for (;;) { const { done, value } = await rd.read(); if (done) break; parts.push(value); n += value.length; onProgress(n); }
+  return new Blob(parts, { type });
+}
+const randomId = () => Array.from(crypto.getRandomValues(new Uint8Array(10)), (b) => '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'[b % 62]).join('');
+const shareLink = (id) => location.origin + location.pathname + '?s=' + id;
+const FILE_LABEL = { bg: 'background', design: 'design image', icon: 'picture', icon2: 'picture 2', logo: 'logo', font: 'font' };
+
+function shareFiles(withFont) { // only what the template actually shows
+  const f = {};
+  if (media.kind && media.file) f.bg = [media.file, media.name];
+  if (S.design.source === 'image' && media.image && media.imageBlob) f.design = [media.imageBlob, media.imageName];
+  for (const k of ICON_KEYS) if (S[k].on && icons[k].img && icons[k].blob) f[k] = [icons[k].blob, icons[k].name];
+  if (S.logo.on && media.logo && media.logoBlob) f.logo = [media.logoBlob, media.logoName];
+  if (withFont && fontBytes) f.font = [fontBlob || (fontBlob = new Blob([fontBytes], { type: 'font/otf' })), fontName];
+  return f;
+}
+async function publishShare(id, name, withFont, onStatus) {
+  invalidate(); draw(); // thumbnail first, in this task
+  const man = { v: 1, name, saved: Date.now(), thumb: snapThumb(), S: clone(S), clip: { in: clip.in, out: clip.out }, files: {} };
+  const files = Object.entries(shareFiles(withFont));
+  const total = files.reduce((a, [, [b]]) => a + b.size, 0) || 1;
+  let done = 0;
+  for (const [k, [blob, nm]] of files) {
+    onStatus('Checking the ' + FILE_LABEL[k] + '…', done / total);
+    const h = await hashBlob(blob);
+    if (!(await sbList('m', h)).some((o) => o.name === h)) { // already uploaded by an earlier share: skip
+      await sbUpload('m/' + h, blob, { onProgress: (n) => onStatus('Uploading the ' + FILE_LABEL[k] + ' (' + fmtMB(blob.size) + ')…', (done + n) / total) });
+    }
+    done += blob.size;
+    man.files[k] = { h, name: nm, type: blob.type || '', size: blob.size };
+  }
+  onStatus('Saving the link…', 1);
+  await sbUpload('s/' + id + '.json', new Blob([JSON.stringify(man)], { type: 'application/json' }), { upsert: true, cache: 0 });
+  return man;
+}
+async function listShares() { // [{ id, name, saved, thumb, files }], plus whether every manifest could be read
+  const objs = (await sbList('s')).filter((o) => /\.json$/.test(o.name));
+  const out = await Promise.all(objs.map(async (o) => {
+    try { const r = await fetch(pubUrl('s/' + o.name) + '?t=' + Date.now()); return r.ok ? Object.assign(await r.json(), { id: o.name.slice(0, -5) }) : null; } catch (e) { return null; }
+  }));
+  const shares = out.filter(Boolean).sort((a, b) => b.saved - a.saved);
+  return { shares, complete: shares.length === objs.length };
+}
+async function deleteShare(id) {
+  await sbRemove(['s/' + id + '.json']);
+  const { shares, complete } = await listShares();
+  if (!complete) return; // never drop files a link we could not read might use
+  const used = new Set(shares.flatMap((s) => Object.values(s.files || {}).map((f) => f.h)));
+  await sbRemove((await sbList('m')).map((o) => o.name).filter((n) => n && !used.has(n)).map((n) => 'm/' + n));
+}
+
+// owner: Share button + dialog
+function buildShareUI() {
+  const btn = document.createElement('button'); btn.className = 'ghost share-btn'; btn.id = 'shareBtn'; btn.title = 'Make a link a client can open: your video and settings, only the text editable';
+  btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M6 8a2.5 2.5 0 0 0 3.5 0l2-2A2.5 2.5 0 0 0 8 2.5l-.7.7M8 6a2.5 2.5 0 0 0-3.5 0l-2 2A2.5 2.5 0 0 0 6 11.5l.7-.7"/></svg>Share';
+  $('exportBtn').before(btn);
+  const m = document.createElement('div'); m.className = 'modal'; m.id = 'shareModal';
+  m.innerHTML = `<div class="card share-card">
+    <div class="sh-head"><h3>Share as a template</h3><button class="icon-btn" data-close title="Close (Esc)"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg></button></div>
+    <p>The link opens this post with your video, font, pictures, logo and every setting. The client can only change the text, then export the MP4.</p>
+    <div data-pane="setup"><p class="sh-note">Share links are not connected yet. They need a free Supabase project: the steps are in the README (Share links).</p></div>
+    <form data-pane="login" class="sh-login">
+      <input type="email" name="email" placeholder="Email" autocomplete="username" required>
+      <input type="password" name="password" placeholder="Password" autocomplete="current-password" required>
+      <button class="primary" type="submit">Sign in</button>
+      <span class="sh-note">Your Supabase login. Only you can make links; clients only open them.</span>
+    </form>
+    <div data-pane="main">
+      <div class="sh-row"><input type="text" data-name spellcheck="false" placeholder="Template name"><button class="primary" data-create>Create link</button></div>
+      <label class="sh-check"><input type="checkbox" class="switch" data-font><span data-fontlabel></span></label>
+      <div class="sh-files" data-files></div>
+      <div class="sh-status" data-status hidden><div class="progress"><div data-bar></div></div><span data-msg></span></div>
+      <div class="sh-row" data-result hidden><input type="text" readonly data-link><button class="ghost" data-copy>Copy</button><a class="ghost" data-open target="_blank" rel="noopener">Open</a></div>
+      <div class="sh-list-h">Your links</div>
+      <div class="sh-list" data-list></div>
+      <div class="sh-foot"><span data-who></span><button class="ghost" data-out>Sign out</button></div>
+    </div>
+  </div>`;
+  document.body.appendChild(m);
+  const q = (sel) => m.querySelector(sel);
+  const panes = [...m.querySelectorAll('[data-pane]')];
+  const nameIn = q('[data-name]'), fontSw = q('[data-font]'), create = q('[data-create]'), list = q('[data-list]');
+  const status = q('[data-status]'), bar = q('[data-bar]'), msg = q('[data-msg]');
+  let busy = false;
+  const show = (p) => panes.forEach((el) => { el.hidden = el.dataset.pane !== p; });
+  const close = () => { if (!busy) m.classList.remove('show'); };
+  const setBusy = (b) => { busy = b; m.querySelectorAll('button, input').forEach((el) => { if (!el.closest('[data-result]')) el.disabled = b; }); };
+  const progress = (t, f) => { status.hidden = false; msg.textContent = t; bar.style.width = Math.round(Math.min(1, f) * 100) + '%'; };
+  const showLink = (id) => { const r = q('[data-result]'); r.hidden = false; q('[data-link]').value = shareLink(id); q('[data-open]').href = shareLink(id); };
+  const summary = () => {
+    const f = shareFiles(fontSw.checked), parts = Object.entries(f).map(([k, [b]]) => FILE_LABEL[k] + ' ' + fmtMB(b.size));
+    q('[data-files]').textContent = parts.length ? 'Uploads: ' + parts.join(', ') + '. Files an earlier link already uploaded are skipped.' : 'No files to upload, only the settings.';
+  };
+  const copy = (id, el) => { navigator.clipboard.writeText(shareLink(id)).then(() => { if (el) { const t = el.textContent; el.textContent = 'Copied'; setTimeout(() => { el.textContent = t; }, 1200); } else toast('Link copied'); }).catch(() => toast('Copy failed, select the link and copy it', true)); };
+  const fail = (e) => { status.hidden = true; if (/sign in/i.test(e.message)) render(); toast('Share failed: ' + e.message, true); };
+
+  async function run(id, name) {
+    setBusy(true); progress('Starting…', 0);
+    try {
+      await publishShare(id, name, fontSw.checked, progress);
+      status.hidden = true; showLink(id); q('[data-link]').select();
+      copy(id); refreshList();
+    } catch (e) { fail(e); } finally { setBusy(false); }
+  }
+  async function refreshList() {
+    list.innerHTML = '<div class="sh-note">Loading…</div>';
+    let res;
+    const note = (t) => { list.innerHTML = ''; const n = document.createElement('div'); n.className = 'sh-note'; n.textContent = t; list.appendChild(n); };
+    try { res = await listShares(); } catch (e) { if (/sign in/i.test(e.message)) render(); else note('Could not list links: ' + e.message); return; }
+    if (!res.shares.length) { note('No links yet.'); return; }
+    list.innerHTML = '';
+    for (const s of res.shares) {
+      const r = document.createElement('div'); r.className = 'pre';
+      const im = document.createElement('img'); if (s.thumb) im.src = s.thumb; im.alt = '';
+      const t = document.createElement('div'); t.className = 'pn'; t.textContent = s.name;
+      const sm = document.createElement('small'); sm.textContent = new Date(s.saved).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }); t.appendChild(sm);
+      const cp = document.createElement('button'); cp.className = 'ghost'; cp.textContent = 'Copy'; cp.title = shareLink(s.id);
+      cp.addEventListener('click', (e) => { e.stopPropagation(); copy(s.id, cp); });
+      const up = document.createElement('button'); up.className = 'ghost'; up.textContent = 'Update'; up.title = 'Replace this link’s template with what is on screen now (same link)';
+      up.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!up.classList.contains('arm')) { up.classList.add('arm'); up.textContent = 'Sure?'; setTimeout(() => { up.classList.remove('arm'); up.textContent = 'Update'; }, 2500); return; }
+        run(s.id, s.name);
+      });
+      const x = document.createElement('button'); x.className = 'icon-btn del'; x.title = 'Delete link';
+      x.innerHTML = '<svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg>';
+      x.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!x.classList.contains('arm')) { x.classList.add('arm'); x.title = 'Click again: the link stops working'; setTimeout(() => { x.classList.remove('arm'); x.title = 'Delete link'; }, 2500); return; }
+        setBusy(true);
+        try { await deleteShare(s.id); toast('Link deleted'); } catch (err) { toast('Delete failed: ' + err.message, true); }
+        setBusy(false); refreshList();
+      });
+      r.addEventListener('click', () => window.open(shareLink(s.id), '_blank', 'noopener'));
+      r.title = 'Open ' + shareLink(s.id);
+      r.append(im, t, cp, up, x); list.appendChild(r);
+    }
+  }
+  function render() {
+    if (!shareOn) return show('setup');
+    if (!sbAuth) return show('login');
+    show('main');
+    q('[data-who]').textContent = 'Signed in as ' + sbAuth.email;
+    if (!nameIn.value) nameIn.value = curPreset || (S.design.source === 'text' ? S.design.text.split('\n').join(' ').trim() : media.imageName) || 'Template';
+    fontSw.disabled = !fontBytes; fontSw.checked = !!fontBytes;
+    q('[data-fontlabel]').textContent = fontBytes ? 'Include the font file (' + fontName + '). Anyone with the link can download it, so check the font license.'
+      : 'Font: ' + (fontName ? fontName + ' is installed on this computer, so it cannot be uploaded. Load font with the file to include it.' : 'Helvetica, nothing to upload.');
+    summary();
+    refreshList();
+  }
+  fontSw.addEventListener('change', summary);
+  q('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target); setBusy(true);
+    try { await sbSignIn(fd.get('email'), fd.get('password')); e.target.reset(); render(); } catch (err) { toast('Sign in failed: ' + err.message, true); }
+    setBusy(false);
+  });
+  create.addEventListener('click', () => { const n = nameIn.value.trim(); if (!n) { toast('Name the template first', true); return; } run(randomId(), n); });
+  nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') create.click(); });
+  q('[data-copy]').addEventListener('click', (e) => copy(q('[data-link]').value.split('?s=')[1], e.target));
+  q('[data-out]').addEventListener('click', () => { saveAuth(null); render(); });
+  q('[data-close]').addEventListener('click', close);
+  m.addEventListener('pointerdown', (e) => { if (e.target === m) close(); });
+  m.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape') close(); });
+  btn.addEventListener('click', () => { q('[data-result]').hidden = true; status.hidden = true; m.classList.add('show'); render(); });
+}
+
+// client: open a shared template
+let shareTexts = {};
+const shareKey = () => 'afterglow.share.' + SHARE_ID;
+function buildClientPanel(man) {
+  const root = document.createElement('div'); root.className = 'sec client';
+  const head = document.createElement('div'); head.className = 'sec-head';
+  const t = document.createElement('div'); t.className = 't'; t.textContent = man.name || 'Template';
+  head.appendChild(t);
+  const p = document.createElement('p'); p.className = 'client-note';
+  const fields = [];
+  if (S.design.source === 'text') {
+    fields.push(['design.text', 'Text', 'text-in']);
+    if (man.S.design.above.trim()) fields.push(['design.above', 'Line above', 'text-in sub']);
+    if (man.S.design.below.trim()) fields.push(['design.below', 'Line below', 'text-in sub']);
+  }
+  for (const k of ICON_KEYS) if (S[k].on && icons[k].img && man.S[k].badge.trim()) fields.push([k + '.badge', k === 'icon' ? 'Badge' : 'Badge 2', 'text-in sub']);
+  p.textContent = fields.length ? 'Change the text, then Export MP4. Everything else comes from the template.' : 'This template has no text to change. Export MP4 to download it.';
+  const rows = document.createElement('div'); rows.className = 'text-row';
+  const tas = fields.map(([key, label, cls]) => {
+    const l = document.createElement('label'); l.className = 'client-label'; l.textContent = label;
+    const ta = document.createElement('textarea'); ta.className = cls; ta.rows = 1; ta.spellcheck = false; ta.value = getP(key);
+    ta.autosize = () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; };
+    ta.addEventListener('input', () => {
+      setP(key, ta.value); shareTexts[key] = ta.value; ta.autosize(); changed();
+      try { localStorage.setItem(shareKey(), JSON.stringify(shareTexts)); } catch (e) {}
+    });
+    rows.append(l, ta); return ta;
+  });
+  if (fields.length) {
+    const rs = document.createElement('button'); rs.className = 'ghost'; rs.textContent = 'Back to the template text'; rs.style.alignSelf = 'flex-start';
+    rs.addEventListener('click', () => {
+      const base = merge(DEFAULTS, man.S);
+      fields.forEach(([key], i) => { setP(key, key.split('.').reduce((o, k) => o[k], base)); tas[i].value = getP(key); tas[i].autosize(); });
+      shareTexts = {}; try { localStorage.removeItem(shareKey()); } catch (e) {}
+      changed();
+    });
+    rows.appendChild(rs);
+  }
+  root.append(head, p, rows);
+  side.insertBefore(root, side.firstChild);
+  requestAnimationFrame(() => tas.forEach((ta) => ta.autosize()));
+}
+async function openShare() {
+  const modal = $('modal');
+  $('mTitle').textContent = 'Opening template'; $('mText').textContent = 'Loading…'; $('mBar').style.width = '0'; $('mCancel').hidden = true;
+  modal.classList.add('show');
+  try {
+    if (!shareOn) throw new Error('Share links are not set up on this site.');
+    const r = await fetch(pubUrl('s/' + SHARE_ID + '.json') + '?t=' + Date.now());
+    if (!r.ok) throw new Error(r.status === 400 || r.status === 404 ? 'This link does not exist, or it was deleted.' : 'Could not load it (HTTP ' + r.status + ').');
+    const man = await r.json();
+    const ents = Object.entries(man.files || {});
+    const total = ents.reduce((a, [, f]) => a + (f.size || 0), 0) || 1, got = {};
+    const tick = () => { const n = Object.values(got).reduce((a, b) => a + b, 0); $('mText').textContent = 'Loading video and files… ' + fmtMB(n) + ' of ' + fmtMB(total); $('mBar').style.width = Math.round(100 * n / total) + '%'; };
+    const blobs = Object.fromEntries(await Promise.all(ents.map(async ([k, f]) => [k, await fetchBlob(pubUrl('m/' + f.h), f.type, (n) => { got[k] = n; tick(); })])));
+    S = merge(DEFAULTS, man.S);
+    try { shareTexts = JSON.parse(localStorage.getItem(shareKey()) || '{}') || {}; } catch (e) { shareTexts = {}; }
+    for (const [key, v] of Object.entries(shareTexts)) if (typeof v === 'string' && typeof getP(key) === 'string') setP(key, v);
+    await fontReady; // an installed copy settles first, so the template's own file wins
+    if (blobs.font) await useFontSource(await blobs.font.arrayBuffer(), man.files.font.name).catch(() => false);
+    for (const k of ICON_KEYS) if (blobs[k]) await useIcon(k, blobs[k], man.files[k].name, false);
+    if (blobs.logo) await useLogo(blobs.logo, man.files.logo.name, false);
+    if (blobs.design) await loadDesignImage(blobs.design, man.files.design.name);
+    if (S.design.source === 'image' && !media.image) S.design.source = 'text';
+    textKey = '';
+    if (S.design.source === 'text') buildText(); else renderer.setDesign(media.image);
+    if (blobs.bg) setVideoFile(new File([blobs.bg], man.files.bg.name, { type: man.files.bg.type || blobs.bg.type }), man.clip);
+    shareName = man.name || '';
+    document.title = (man.name ? man.name + ' · ' : '') + 'Afterglow';
+    buildClientPanel(man);
+    layout(); updateMediaLabels(); syncAll(); changed();
+    modal.classList.remove('show'); $('mCancel').hidden = false;
+  } catch (e) {
+    $('mTitle').textContent = 'Could not open this template';
+    $('mText').textContent = e.message || String(e);
+    $('mBar').style.width = '0';
+  }
+}
 
 // images are not kept between sessions, so always start from the text design
 if (S.design.source === 'image') S.design.source = 'text';
-if (!savedHadSource) placeDesign();
+if (!savedHadSource && !SHARE_ID) placeDesign();
 syncAll();
 updateMediaLabels();
 setMode('edit');
 layout();
-loadDemo();
+if (SHARE_ID) openShare(); else { loadDemo(); buildShareUI(); }
 // Never hold the text back for the font: draw with the fallback after a short wait, swap when it arrives.
 const showText = () => { if (S.design.source === 'text') buildText(); updateMediaLabels(); changed(); };
 withTimeout(fontReady, 800).then(showText);
 fontReady.then(showText);
 
-window.afterglow = { get S() { return S; }, set S(v) { S = merge(DEFAULTS, v); changed(); }, savePreset, loadPreset, deletePreset, icons, textCanvas, buildText, setDesign, applySource, renderer, media, clip, setMode, exportMP4, draw, video };
+window.afterglow = { get S() { return S; }, set S(v) { S = merge(DEFAULTS, v); changed(); }, savePreset, loadPreset, deletePreset, publishShare, listShares, deleteShare, icons, textCanvas, buildText, setDesign, applySource, renderer, media, clip, setMode, exportMP4, draw, video };

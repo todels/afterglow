@@ -1759,7 +1759,10 @@ async function openGhLink() {
   try {
     const key = location.hash.slice(1);
     if (!key) throw new Error('This link is missing its key (the part after #). Copy the whole link again.');
-    const r = await fetch(ghRawUrl('t/' + TPL_ID + '.bin') + '?v=' + Date.now());
+    // the API serves an Update right away (raw.githubusercontent.com caches 5 min); raw is the fallback
+    // when the API is rate limited (60 an hour per network without a token)
+    let r = await fetch(ghContents('t/' + TPL_ID + '.bin'), { headers: { accept: 'application/vnd.github.raw' }, cache: 'no-store' }).catch(() => null);
+    if (!r || !r.ok) r = await fetch(ghRawUrl('t/' + TPL_ID + '.bin') + '?v=' + Date.now());
     if (!r.ok) throw new Error(r.status === 404 ? 'This link does not exist or was deleted. A brand new link can take a minute to show up, so try again shortly.' : 'Could not load it (HTTP ' + r.status + ').');
     const total = +r.headers.get('content-length') || 0;
     let buf;
@@ -1843,7 +1846,7 @@ function buildShareUI() {
       status.hidden = true;
       const url = ghLinkUrl(rec.id, rec.key);
       const r = q('[data-result]'); r.hidden = false; q('[data-link]').value = url; q('[data-open]').href = url; q('[data-link]').select();
-      const done = prev ? 'Link updated (same link). Clients see it after a reload, within a few minutes.' : 'Link copied';
+      const done = prev ? 'Link updated (same link). Clients see it after a reload.' : 'Link copied';
       navigator.clipboard.writeText(url).then(() => toast(done), () => toast(prev ? done : 'Link ready: click Copy')); // the click is long past after an upload
       renderList();
     } catch (e) {

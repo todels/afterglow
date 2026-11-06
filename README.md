@@ -52,7 +52,7 @@ Formats: 16:9 (1920×1080), 1:1, 4:5 (1080×1350), 9:16 (1080×1920). 30 or 60 f
 
 **Share** (top right) makes a link for a client. It opens this post with the video, font, pictures, logo, trim and every setting. The client can only change the text (main text, the lines above / below if the template has them, badges), then Export MP4. Their text stays in their browser, so a reload keeps it.
 
-**Create link** packs the template, encrypts it in your browser and commits it to the GitHub repo `todels/afterglow-shares`. The link looks like `…/afterglow/?t=abc123#key`. The key after `#` is never sent to any server, so the repo only holds files nobody can open without the link. **Copy** copies a link again, **Update** (click twice) replaces a link's template with what is on screen now (same link; clients see it after a reload, GitHub can take up to 5 minutes), **×** (click twice) deletes it. The list of links lives in the browser you made them in (it holds the keys).
+**Create link** packs the template, encrypts it in your browser and commits it to the GitHub repo `todels/afterglow-shares`. The link looks like `…/afterglow/?t=abc123#key`. The key after `#` is never sent to any server, so the repo only holds files nobody can open without the link. **Copy** copies a link again, **Update** (click twice) replaces a link's template with what is on screen now (same link; clients see it after a reload), **×** (click twice) deletes it. The list of links lives in the browser you made them in (it holds the keys).
 
 Connect GitHub once (the Share dialog walks you through it):
 

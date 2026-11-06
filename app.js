@@ -1,12 +1,14 @@
 import { Renderer } from './gl.js';
 import { Muxer, ArrayBufferTarget } from './vendor/mp4-muxer.mjs';
-import { SHARE } from './share-config.js';
+import { SHARE, GH_SHARE } from './share-config.js';
 
-// ?s=<id> opens a shared template: everything locked except the text, nothing saved in this browser.
-// ?open waits for a template file (.afterglow) the client was sent.
+// ?t=<id>#<key> (GitHub) or ?s=<id> (Supabase) opens a shared template: everything locked except the text,
+// nothing saved in this browser. ?open waits for a template file (.afterglow) the client was sent.
 const QS = new URLSearchParams(location.search);
 const SHARE_ID = (QS.get('s') || '').replace(/[^A-Za-z0-9]/g, '');
-let CLIENT = !!SHARE_ID || QS.has('open');
+const TPL_ID = (QS.get('t') || '').replace(/[^A-Za-z0-9]/g, '');
+const LINK_ID = TPL_ID || SHARE_ID;
+let CLIENT = !!LINK_ID || QS.has('open');
 if (CLIENT) document.body.classList.add('shared');
 
 // ------------------------------------------------------------------ state
@@ -924,7 +926,7 @@ window.addEventListener('dragover', (e) => e.preventDefault());
 window.addEventListener('drop', (e) => {
   e.preventDefault(); dragDepth = 0; document.body.classList.remove('dragging');
   const tpl = [...e.dataTransfer.files].find(isTemplateFile);
-  if (tpl && !SHARE_ID) { openTemplateFile(tpl); return; }
+  if (tpl && !LINK_ID) { openTemplateFile(tpl); return; }
   if (CLIENT) return;
   for (const f of e.dataTransfer.files) {
     if (isFontFile(f)) loadFontFile(f);
@@ -1642,7 +1644,9 @@ function templateFile(name, withFont) {
   }
   const json = new TextEncoder().encode(JSON.stringify(man));
   const len = new Uint8Array(4); new DataView(len.buffer).setUint32(0, json.length, true);
-  return new Blob([TPL_MAGIC, len, json, ...parts], { type: 'application/octet-stream' });
+  const out = new Blob([TPL_MAGIC, len, json, ...parts], { type: 'application/octet-stream' });
+  out.man = man;
+  return out;
 }
 async function readTemplateFile(file) {
   const head = new Uint8Array(await file.slice(0, 12).arrayBuffer());
@@ -1658,52 +1662,158 @@ async function readTemplateFile(file) {
 }
 const isTemplateFile = (f) => /\.afterglow$/i.test(f.name);
 
+// GitHub links (?t=<id>#<key>): the template file is encrypted in the browser (AES-GCM, random key per link),
+// committed to a public repo with the owner's token, and read back from raw.githubusercontent.com. The key
+// only lives in the link's #fragment, which browsers never send to a server, so GitHub only holds ciphertext.
+const GHC = (() => { // localStorage override is for local testing against a stand-in API
+  const base = Object.assign({ repo: 'todels/afterglow-shares', api: 'https://api.github.com', raw: 'https://raw.githubusercontent.com' }, GH_SHARE || {});
+  try { const o = JSON.parse(localStorage.getItem('afterglow.ghApi') || 'null'); if (o) Object.assign(base, o); } catch (e) {}
+  return base;
+})();
+let ghToken = '';
+try { ghToken = localStorage.getItem('afterglow.ghToken') || ''; } catch (e) {}
+function setGhToken(t) { ghToken = t || ''; try { if (t) localStorage.setItem('afterglow.ghToken', t); else localStorage.removeItem('afterglow.ghToken'); } catch (e) {} }
+const ghLinkUrl = (id, key) => location.origin + location.pathname + '?t=' + id + '#' + key;
+const ghContents = (path) => GHC.api + '/repos/' + GHC.repo + '/contents/' + path;
+const ghRawUrl = (path) => GHC.raw + '/' + GHC.repo + '/HEAD/' + path;
+const ghHeaders = (json) => Object.assign({ authorization: 'Bearer ' + ghToken, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' }, json ? { 'content-type': 'application/json' } : {});
+function ghError(status, j) {
+  const m = (j && j.message) || 'HTTP ' + status;
+  if (status === 401) return 'GitHub did not accept the token (expired or wrong). Connect again.';
+  if (status === 403 || /not accessible/i.test(m)) return 'the token cannot write to ' + GHC.repo + ' (it needs Contents: Read and write on that repo)';
+  if (status === 404) return 'repo ' + GHC.repo + ' not found, or the token cannot see it';
+  if (status === 413 || /too large/i.test(m)) return 'too big for GitHub (100 MB per file). Trim or compress the video.';
+  return m;
+}
+async function ghGet(path) { // { sha } or null
+  const r = await fetch(ghContents(path), { headers: ghHeaders(), cache: 'no-store' });
+  if (r.status === 404) return null;
+  let j = null; try { j = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error(ghError(r.status, j));
+  return j;
+}
+function ghPut(path, body, onProgress) {
+  return new Promise((res, rej) => {
+    const x = new XMLHttpRequest();
+    x.open('PUT', ghContents(path));
+    const h = ghHeaders(true); for (const k in h) x.setRequestHeader(k, h[k]);
+    if (onProgress) x.upload.onprogress = (e) => onProgress(e.loaded, e.total);
+    x.onload = () => { let j = null; try { j = JSON.parse(x.responseText); } catch (e) {} if (x.status < 300) res(j); else rej(new Error(ghError(x.status, j))); };
+    x.onerror = () => rej(new Error('network error'));
+    x.send(JSON.stringify(body));
+  });
+}
+async function ghDelete(path) {
+  const cur = await ghGet(path); if (!cur) return;
+  const r = await fetch(ghContents(path), { method: 'DELETE', headers: ghHeaders(true), body: JSON.stringify({ message: 'Remove ' + path, sha: cur.sha }) });
+  if (!r.ok) { let j = null; try { j = await r.json(); } catch (e) {} throw new Error(ghError(r.status, j)); }
+}
+const b64url = (u8) => btoa(String.fromCharCode(...u8)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const unb64url = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+const blobB64 = (b) => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result.slice(fr.result.indexOf(',') + 1)); fr.onerror = () => rej(fr.error); fr.readAsDataURL(b); });
+async function sealBlob(blob, keyStr) { // -> { key, data: Blob(iv + ciphertext) }
+  const raw = keyStr ? unb64url(keyStr) : crypto.getRandomValues(new Uint8Array(32)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const k = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt']);
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, k, await blob.arrayBuffer());
+  return { key: b64url(raw), data: new Blob([iv, ct]) };
+}
+async function openSealed(buf, keyStr) {
+  const k = await crypto.subtle.importKey('raw', unb64url(keyStr), 'AES-GCM', false, ['decrypt']);
+  return new Blob([await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(buf, 0, 12) }, k, new Uint8Array(buf, 12))]);
+}
+// links made in this browser (the key is only in the link, so the list keeps it to copy / update)
+const ghLinks = () => { try { return JSON.parse(localStorage.getItem('afterglow.ghLinks') || '[]') || []; } catch (e) { return []; } };
+function saveGhLinks(list) { try { localStorage.setItem('afterglow.ghLinks', JSON.stringify(list)); } catch (e) { toast('Could not save the link list in this browser', true); } }
+async function publishGh(name, withFont, onStatus, prev) { // prev: { id, key } to update a link in place
+  const blob = templateFile(name, withFont); // draws + thumbnails first, in this task
+  if (blob.size > 95e6) throw new Error('the template is ' + fmtMB(blob.size) + ', GitHub takes up to 100 MB per file. Trim or compress the video.');
+  onStatus('Encrypting…', 0.02);
+  const id = prev ? prev.id : randomId();
+  const { key, data } = await sealBlob(blob, prev && prev.key);
+  const content = await blobB64(data);
+  const path = 't/' + id + '.bin';
+  const cur = prev ? await ghGet(path) : null;
+  onStatus('Uploading ' + fmtMB(data.size) + ' to GitHub…', 0.05);
+  await ghPut(path, Object.assign({ message: (cur ? 'Update ' : 'Add ') + id, content }, cur ? { sha: cur.sha } : {}),
+    (n, t) => onStatus('Uploading ' + fmtMB(data.size) + ' to GitHub…', 0.05 + 0.95 * n / (t || n || 1)));
+  const rec = { id, key, name, saved: Date.now(), thumb: blob.man.thumb, size: data.size };
+  saveGhLinks([rec, ...ghLinks().filter((l) => l.id !== id)]);
+  return rec;
+}
+async function deleteGh(id) {
+  await ghDelete('t/' + id + '.bin');
+  saveGhLinks(ghLinks().filter((l) => l.id !== id));
+}
+async function openGhLink() {
+  clientModal('Opening template', 'Loading…');
+  try {
+    const key = location.hash.slice(1);
+    if (!key) throw new Error('This link is missing its key (the part after #). Copy the whole link again.');
+    const r = await fetch(ghRawUrl('t/' + TPL_ID + '.bin') + '?v=' + Date.now());
+    if (!r.ok) throw new Error(r.status === 404 ? 'This link does not exist or was deleted. A brand new link can take a minute to show up, so try again shortly.' : 'Could not load it (HTTP ' + r.status + ').');
+    const total = +r.headers.get('content-length') || 0;
+    let buf;
+    if (r.body && total) {
+      const rd = r.body.getReader(), parts = []; let n = 0;
+      for (;;) {
+        const { done, value } = await rd.read(); if (done) break;
+        parts.push(value); n += value.length;
+        $('mText').textContent = 'Loading video and files… ' + fmtMB(n) + ' of ' + fmtMB(total); $('mBar').style.width = Math.round(100 * n / total) + '%';
+      }
+      buf = await new Blob(parts).arrayBuffer();
+    } else buf = await r.arrayBuffer();
+    $('mText').textContent = 'Opening…';
+    let plain;
+    try { plain = await openSealed(buf, key); } catch (e) { throw new Error('The link key does not match this template. Copy the whole link again.'); }
+    const { man, blobs } = await readTemplateFile(plain);
+    await applyTemplate(man, blobs);
+    doneModal();
+  } catch (e) { clientModal('Could not open this template', e.message || String(e)); }
+}
+
 // owner: Share button + dialog
 function buildShareUI() {
-  const btn = document.createElement('button'); btn.className = 'ghost share-btn'; btn.id = 'shareBtn'; btn.title = 'Share this post as a template: your video and settings, only the text editable';
+  const btn = document.createElement('button'); btn.className = 'ghost share-btn'; btn.id = 'shareBtn'; btn.title = 'Share this post as a template link: your video and settings, only the text editable';
   btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M6 8a2.5 2.5 0 0 0 3.5 0l2-2A2.5 2.5 0 0 0 8 2.5l-.7.7M8 6a2.5 2.5 0 0 0-3.5 0l-2 2A2.5 2.5 0 0 0 6 11.5l.7-.7"/></svg>Share';
   $('exportBtn').before(btn);
   const m = document.createElement('div'); m.className = 'modal'; m.id = 'shareModal';
   const X = '<svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg>';
+  const [owner, repoName] = GHC.repo.split('/');
+  const newRepo = 'https://github.com/new?name=' + encodeURIComponent(repoName) + '&visibility=public&description=' + encodeURIComponent('Encrypted Afterglow share templates');
+  const newToken = 'https://github.com/settings/personal-access-tokens/new?name=' + encodeURIComponent('Afterglow share links') + '&description=' + encodeURIComponent('Upload encrypted templates to ' + GHC.repo) + '&target_name=' + encodeURIComponent(owner) + '&expires_in=366&contents=write';
   m.innerHTML = `<div class="card share-card">
     <div class="sh-head"><h3>Share as a template</h3><button class="icon-btn" data-close title="Close (Esc)">${X}</button></div>
-    <p>The client gets this post with your video, font, pictures, logo and every setting. They can only change the text, then export the MP4.</p>
+    <p>The link opens this post with your video, font, pictures, logo and every setting. The client can only change the text, then export the MP4.</p>
     <div class="sh-row"><input type="text" data-name spellcheck="false" placeholder="Template name"></div>
     <label class="sh-check"><input type="checkbox" class="switch" data-font><span data-fontlabel></span></label>
     <div class="sh-files" data-files></div>
-    <div class="sh-status" data-status hidden><div class="progress"><div data-bar></div></div><span data-msg></span></div>
-    <div class="sh-step">
-      <div class="sh-step-h">Template file <span>works now, no account</span></div>
-      <p class="sh-note">Download the file, then send the client the file and this link. They open the link, drop the file in, change the text and export.</p>
-      <div class="sh-row"><button class="primary" data-file>Download template file</button></div>
-      <div class="sh-row"><input type="text" readonly data-openlink><button class="ghost" data-copyopen>Copy link</button></div>
+    <div data-connect>
+      <div class="sh-step-h">Connect GitHub once</div>
+      <ol class="sh-steps">
+        <li><a href="${newRepo}" target="_blank" rel="noopener">Create the repo ${GHC.repo}</a> (keep it Public, tick Add a README, Create repository). Links are stored there encrypted: without the link nobody can open them.</li>
+        <li><a href="${newToken}" target="_blank" rel="noopener">Create a token</a>: Repository access > Only select repositories > ${repoName}. Contents: Read and write. Generate, then copy it.</li>
+        <li>Paste it here. It stays in this browser only.</li>
+      </ol>
+      <form class="sh-row" data-tokenform><input type="password" name="token" placeholder="github_pat_…" autocomplete="off" spellcheck="false" required><button class="primary" type="submit">Connect</button></form>
     </div>
-    <div class="sh-step" data-links>
-      <div class="sh-step-h">Link only <span>no file to send</span></div>
-      <p class="sh-note" data-setup>Needs a free Supabase project (README, Share links). Not connected yet.</p>
-      <form class="sh-login" data-login>
-        <input type="email" name="email" placeholder="Email" autocomplete="username" required>
-        <input type="password" name="password" placeholder="Password" autocomplete="current-password" required>
-        <button class="primary" type="submit">Sign in</button>
-        <span class="sh-note">Your Supabase login. Only you can make links; clients only open them.</span>
-      </form>
-      <div data-main>
-        <div class="sh-row"><button class="primary" data-create>Create link</button></div>
-        <div class="sh-row" data-result hidden><input type="text" readonly data-link><button class="ghost" data-copy>Copy</button><a class="ghost" data-open target="_blank" rel="noopener">Open</a></div>
-        <div class="sh-list" data-list></div>
-        <div class="sh-foot"><span data-who></span><button class="ghost" data-out>Sign out</button></div>
-      </div>
+    <div data-main>
+      <div class="sh-row"><button class="primary sh-big" data-create>Create link</button></div>
+      <div class="sh-status" data-status hidden><div class="progress"><div data-bar></div></div><span data-msg></span></div>
+      <div class="sh-row" data-result hidden><input type="text" readonly data-link><button class="ghost" data-copy>Copy</button><a class="ghost" data-open target="_blank" rel="noopener">Open</a></div>
+      <div class="sh-list-h">Your links</div>
+      <div class="sh-list" data-list></div>
+      <div class="sh-foot"><span>GitHub connected (${GHC.repo})</span><button class="ghost" data-out>Disconnect</button></div>
     </div>
+    <div class="sh-alt">No link needed? <button class="linkish" data-file>Download a template file</button> to send with <button class="linkish" data-copyopen>this link</button>.</div>
   </div>`;
   document.body.appendChild(m);
   const q = (sel) => m.querySelector(sel);
-  const nameIn = q('[data-name]'), fontSw = q('[data-font]'), create = q('[data-create]'), list = q('[data-list]');
+  const nameIn = q('[data-name]'), fontSw = q('[data-font]'), list = q('[data-list]');
   const status = q('[data-status]'), bar = q('[data-bar]'), msg = q('[data-msg]');
   let busy = false;
   const close = () => { if (!busy) m.classList.remove('show'); };
   const setBusy = (b) => { busy = b; m.querySelectorAll('button, input').forEach((el) => { if (!el.readOnly && !el.closest('[data-result]')) el.disabled = b; }); };
   const progress = (t, f) => { status.hidden = false; msg.textContent = t; bar.style.width = Math.round(Math.min(1, f) * 100) + '%'; };
-  const showLink = (id) => { const r = q('[data-result]'); r.hidden = false; q('[data-link]').value = shareLink(id); q('[data-open]').href = shareLink(id); };
   const summary = () => {
     const f = shareFiles(fontSw.checked), parts = Object.entries(f).map(([k, [b]]) => FILE_LABEL[k] + ' ' + fmtMB(b.size));
     const total = Object.values(f).reduce((a, [b]) => a + b.size, 0);
@@ -1712,58 +1822,54 @@ function buildShareUI() {
   const copyText = (text, el, done) => navigator.clipboard.writeText(text).then(() => {
     if (el) { const t = el.textContent; el.textContent = 'Copied'; setTimeout(() => { el.textContent = t; }, 1200); } else toast(done || 'Copied');
   }).catch(() => toast('Copy failed, select the text and copy it', true));
-  const fail = (e) => { status.hidden = true; if (/sign in/i.test(e.message)) render(); toast('Share failed: ' + e.message, true); };
   const nameNow = () => nameIn.value.trim();
 
-  q('[data-openlink]').value = openLink();
-  q('[data-copyopen]').addEventListener('click', (e) => copyText(openLink(), e.target));
-  q('[data-file]').addEventListener('click', () => {
-    const n = nameNow(); if (!n) { toast('Name the template first', true); return; }
-    const blob = templateFile(n, fontSw.checked);
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = slug(n) + '.afterglow';
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-    toast('Downloaded ' + slug(n) + '.afterglow (' + fmtMB(blob.size) + '). Send it with the link.');
-  });
-
-  async function run(id, name) {
+  async function run(prev) {
+    const n = prev ? prev.name : nameNow();
+    if (!n) { toast('Name the template first', true); return; }
     setBusy(true); progress('Starting…', 0);
     try {
-      await publishShare(id, name, fontSw.checked, progress);
-      status.hidden = true; showLink(id); q('[data-link]').select();
-      copyText(shareLink(id), null, 'Link copied'); refreshList();
-    } catch (e) { fail(e); } finally { setBusy(false); }
+      const rec = await publishGh(n, fontSw.checked, progress, prev);
+      status.hidden = true;
+      const url = ghLinkUrl(rec.id, rec.key);
+      const r = q('[data-result]'); r.hidden = false; q('[data-link]').value = url; q('[data-open]').href = url; q('[data-link]').select();
+      const done = prev ? 'Link updated (same link). Clients see it after a reload, within a few minutes.' : 'Link copied';
+      navigator.clipboard.writeText(url).then(() => toast(done), () => toast(prev ? done : 'Link ready: click Copy')); // the click is long past after an upload
+      renderList();
+    } catch (e) {
+      status.hidden = true;
+      if (/token|Connect again/i.test(e.message) && /401|expired|wrong/.test(e.message)) { setGhToken(''); render(); }
+      toast('Share failed: ' + e.message, true);
+    } finally { setBusy(false); }
   }
-  async function refreshList() {
-    list.innerHTML = '<div class="sh-note">Loading…</div>';
-    let res;
-    const note = (t) => { list.innerHTML = ''; const n = document.createElement('div'); n.className = 'sh-note'; n.textContent = t; list.appendChild(n); };
-    try { res = await listShares(); } catch (e) { if (/sign in/i.test(e.message)) render(); else note('Could not list links: ' + e.message); return; }
-    if (!res.shares.length) { note('No links yet.'); return; }
+  function renderList() {
+    const links = ghLinks();
     list.innerHTML = '';
-    for (const s of res.shares) {
+    if (!links.length) { const n = document.createElement('div'); n.className = 'sh-note'; n.textContent = 'No links yet.'; list.appendChild(n); return; }
+    for (const s of links) {
+      const url = ghLinkUrl(s.id, s.key);
       const r = document.createElement('div'); r.className = 'pre';
       const im = document.createElement('img'); if (s.thumb) im.src = s.thumb; im.alt = '';
       const t = document.createElement('div'); t.className = 'pn'; t.textContent = s.name;
-      const sm = document.createElement('small'); sm.textContent = new Date(s.saved).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }); t.appendChild(sm);
-      const cp = document.createElement('button'); cp.className = 'ghost'; cp.textContent = 'Copy'; cp.title = shareLink(s.id);
-      cp.addEventListener('click', (e) => { e.stopPropagation(); copyText(shareLink(s.id), cp); });
+      const sm = document.createElement('small'); sm.textContent = new Date(s.saved).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) + ' · ' + fmtMB(s.size || 0); t.appendChild(sm);
+      const cp = document.createElement('button'); cp.className = 'ghost'; cp.textContent = 'Copy'; cp.title = url;
+      cp.addEventListener('click', (e) => { e.stopPropagation(); copyText(url, cp); });
       const up = document.createElement('button'); up.className = 'ghost'; up.textContent = 'Update'; up.title = 'Replace this link’s template with what is on screen now (same link)';
       up.addEventListener('click', (e) => {
         e.stopPropagation();
         if (!up.classList.contains('arm')) { up.classList.add('arm'); up.textContent = 'Sure?'; setTimeout(() => { up.classList.remove('arm'); up.textContent = 'Update'; }, 2500); return; }
-        run(s.id, s.name);
+        run(s);
       });
       const x = document.createElement('button'); x.className = 'icon-btn del'; x.title = 'Delete link'; x.innerHTML = X;
       x.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (!x.classList.contains('arm')) { x.classList.add('arm'); x.title = 'Click again: the link stops working'; setTimeout(() => { x.classList.remove('arm'); x.title = 'Delete link'; }, 2500); return; }
         setBusy(true);
-        try { await deleteShare(s.id); toast('Link deleted'); } catch (err) { toast('Delete failed: ' + err.message, true); }
-        setBusy(false); refreshList();
+        try { await deleteGh(s.id); toast('Link deleted'); } catch (err) { toast('Delete failed: ' + err.message, true); }
+        setBusy(false); renderList();
       });
-      r.addEventListener('click', () => window.open(shareLink(s.id), '_blank', 'noopener'));
-      r.title = 'Open ' + shareLink(s.id);
+      r.addEventListener('click', () => window.open(url, '_blank', 'noopener'));
+      r.title = 'Open ' + url;
       r.append(im, t, cp, up, x); list.appendChild(r);
     }
   }
@@ -1773,21 +1879,36 @@ function buildShareUI() {
     q('[data-fontlabel]').textContent = fontBytes ? 'Include the font file (' + fontName + '). The client can get the font file out of it, so check the font license.'
       : 'Font: ' + (fontName ? fontName + ' is installed on this computer, so it cannot be included. Load font with the file to include it.' : 'Helvetica, nothing to include.');
     summary();
-    q('[data-setup]').hidden = shareOn;
-    q('[data-login]').hidden = !shareOn || !!sbAuth;
-    q('[data-main]').hidden = !shareOn || !sbAuth;
-    if (shareOn && sbAuth) { q('[data-who]').textContent = 'Signed in as ' + sbAuth.email; refreshList(); }
+    q('[data-connect]').hidden = !!ghToken;
+    q('[data-main]').hidden = !ghToken;
+    if (ghToken) renderList();
   }
   fontSw.addEventListener('change', summary);
-  q('[data-login]').addEventListener('submit', async (e) => {
+  q('[data-tokenform]').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const fd = new FormData(e.target); setBusy(true);
-    try { await sbSignIn(fd.get('email'), fd.get('password')); e.target.reset(); render(); } catch (err) { toast('Sign in failed: ' + err.message, true); }
+    const t = new FormData(e.target).get('token').trim();
+    setBusy(true);
+    setGhToken(t);
+    try { // the token must see the repo
+      const r = await fetch(GHC.api + '/repos/' + GHC.repo, { headers: ghHeaders(), cache: 'no-store' });
+      if (!r.ok) { let j = null; try { j = await r.json(); } catch (x) {} throw new Error(ghError(r.status, j)); }
+      e.target.reset(); toast('GitHub connected'); render();
+    }
+    catch (err) { setGhToken(''); toast('Could not connect: ' + err.message, true); }
     setBusy(false);
   });
-  create.addEventListener('click', () => { const n = nameNow(); if (!n) { toast('Name the template first', true); return; } run(randomId(), n); });
+  q('[data-create]').addEventListener('click', () => run(null));
   q('[data-copy]').addEventListener('click', (e) => copyText(q('[data-link]').value, e.target));
-  q('[data-out]').addEventListener('click', () => { saveAuth(null); render(); });
+  q('[data-out]').addEventListener('click', () => { setGhToken(''); render(); });
+  q('[data-file]').addEventListener('click', () => {
+    const n = nameNow(); if (!n) { toast('Name the template first', true); return; }
+    const blob = templateFile(n, fontSw.checked);
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = slug(n) + '.afterglow';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    toast('Downloaded ' + slug(n) + '.afterglow (' + fmtMB(blob.size) + '). Send it with ' + openLink());
+  });
+  q('[data-copyopen]').addEventListener('click', () => copyText(openLink(), null, 'Copied ' + openLink() + ': the client opens it and drops the file in'));
   q('[data-close]').addEventListener('click', close);
   m.addEventListener('pointerdown', (e) => { if (e.target === m) close(); });
   m.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape') close(); });
@@ -1795,7 +1916,7 @@ function buildShareUI() {
 }
 
 // client: a shared template (link or file), everything locked except the text
-let shareTexts = {}, tplId = SHARE_ID;
+let shareTexts = {}, tplId = LINK_ID;
 const shareKey = () => 'afterglow.share.' + tplId;
 function enterClient() { // dropping a template file on the editor turns it into the client view
   if (CLIENT) return;
@@ -1841,13 +1962,13 @@ function buildClientPanel(man) {
   }
   const op = document.createElement('button'); op.className = 'ghost'; op.textContent = 'Open another template file'; op.style.alignSelf = 'flex-start';
   op.addEventListener('click', () => tplInput.click());
-  if (!SHARE_ID) rows.appendChild(op);
+  if (!LINK_ID) rows.appendChild(op);
   root.append(head, p, rows);
   side.insertBefore(root, side.firstChild);
   requestAnimationFrame(() => tas.forEach((ta) => ta.autosize()));
 }
 async function applyTemplate(man, blobs) {
-  tplId = SHARE_ID || man.id || slug(man.name);
+  tplId = LINK_ID || man.id || slug(man.name);
   S = merge(DEFAULTS, man.S);
   try { shareTexts = JSON.parse(localStorage.getItem(shareKey()) || '{}') || {}; } catch (e) { shareTexts = {}; }
   for (const [key, v] of Object.entries(shareTexts)) if (typeof v === 'string' && typeof getP(key) === 'string') setP(key, v);
@@ -1914,7 +2035,8 @@ syncAll();
 updateMediaLabels();
 setMode('edit');
 layout();
-if (SHARE_ID) openShare();
+if (TPL_ID) openGhLink();
+else if (SHARE_ID) openShare();
 else if (CLIENT) clientModal('Open the template', 'Drop the .afterglow file you were sent anywhere on this page, or choose it.', true);
 else { loadDemo(); buildShareUI(); }
 // Never hold the text back for the font: draw with the fallback after a short wait, swap when it arrives.
@@ -1922,4 +2044,4 @@ const showText = () => { if (S.design.source === 'text') buildText(); updateMedi
 withTimeout(fontReady, 800).then(showText);
 fontReady.then(showText);
 
-window.afterglow = { get S() { return S; }, set S(v) { S = merge(DEFAULTS, v); changed(); }, savePreset, loadPreset, deletePreset, publishShare, listShares, deleteShare, templateFile, openTemplateFile, icons, textCanvas, buildText, setDesign, applySource, renderer, media, clip, setMode, exportMP4, draw, video };
+window.afterglow = { get S() { return S; }, set S(v) { S = merge(DEFAULTS, v); changed(); }, savePreset, loadPreset, deletePreset, publishGh, deleteGh, ghLinks, templateFile, openTemplateFile, icons, textCanvas, buildText, setDesign, applySource, renderer, media, clip, setMode, exportMP4, draw, video };

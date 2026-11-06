@@ -33,10 +33,18 @@ The text uses A-OTF Shin Go Pro M. It is a licensed font, so it is not in this r
 
    Drag the design to move it (snaps to center), ⌘ + scroll to scale.
 3. **Icon** (optional), the LIVE ON OBOL setup: Add picture takes any image (a token, a partner logo). It is cropped round with a feathered edge (Edge, in % of the diameter; Zoom crops into the picture) and blended Hard light like the Figma group. **Badge** adds a pill at its top left (e.g. "5x"): grey to white, black text, soft glow; long text shrinks to fit. Drag the circle on the canvas to move it, ⌘ + scroll to scale. Size is % of the frame height.
+
+   **Icon 2** is a second picture with the same controls, for partner posts with two logos. The first picture you add goes right next to Icon 1 (same size and height, slightly overlapping); move it from there.
 4. **Logo** (optional): Add logo takes an SVG or PNG (white on transparent). It sits at the bottom centre on top of everything, with no aberration or grain, like the logo layer in the Figma post. Size is % of the frame height. It is stored in that browser.
 5. Tweak the panels. Double-click a slider to reset it.
 6. **Trim** with the two handles on the timeline.
 7. **Export MP4**. Renders every frame at full quality, then downloads.
+
+## Presets
+
+The Presets panel at the top saves everything on screen under a name: all settings, the trim, and the files (the video or still, the design image, both icon pictures and the logo). Click a preset to load it back exactly. Saving under an existing name updates it (the button says Update). The × deletes after a second click.
+
+Presets live in that browser (IndexedDB), not on the site, so they do not move between computers or browsers, and clearing site data removes them. Each file is stored once, so ten presets on the same video take the space of one video. The panel shows how much storage the presets use.
 
 Formats: 16:9 (1920×1080), 1:1, 4:5 (1080×1350), 9:16 (1080×1920). 30 or 60 fps.
 

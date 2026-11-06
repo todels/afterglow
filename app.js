@@ -13,6 +13,7 @@ const DEFAULTS = {
   look:   { on: true, vignette: 80, spread: 53 },
   logo:   { on: true, size: 6.1, y: 90.2 },
   icon:   { on: true, badge: '', blend: 'hardlight', size: 45, x: 26.8, y: 40.4, zoom: 109.6, edge: 1.7 },
+  icon2:  { on: true, badge: '', blend: 'hardlight', size: 45, x: 47, y: 40.4, zoom: 109.6, edge: 1.7 },
 };
 const FORMATS = { '16:9': [1920, 1080], '1:1': [1080, 1080], '4:5': [1080, 1350], '9:16': [1080, 1920] };
 const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -46,7 +47,7 @@ const media = {
   image: null, imageName: '',   // dropped / pasted design PNG
   text: null,                   // rendered text design { canvas, fit, px }
   logo: null, logoName: '',     // logo image (kept in this browser)
-  icon: null, iconName: '',     // icon picture (kept in this browser)
+  logoBlob: null, imageBlob: null, // source files, for presets
 };
 const activeDesign = () => (S.design.source === 'text' ? media.text : media.image);
 const clip = { in: 0, out: 6 };
@@ -89,11 +90,29 @@ async function useFontSource(src, name) {
   textFamily = fam + ', ' + FALLBACK; fontName = name; return true;
 }
 // Fonts dropped by the user live only in this browser (IndexedDB); Shin Go is licensed and never deployed.
+// Stores: kv (current font / logo / icons), presets (by name), media (blobs by content hash, shared by presets).
+let dbp = null;
 function idb() {
-  return new Promise((res, rej) => { const r = indexedDB.open('afterglow', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  if (!dbp) dbp = new Promise((res, rej) => {
+    const r = indexedDB.open('afterglow', 2);
+    r.onupgradeneeded = () => { for (const n of ['kv', 'presets', 'media']) if (!r.result.objectStoreNames.contains(n)) r.result.createObjectStore(n); };
+    r.onsuccess = () => { const db = r.result; db.onversionchange = () => { db.close(); dbp = null; }; res(db); };
+    r.onerror = () => { dbp = null; rej(r.error); };
+    r.onblocked = () => toast('Close other Afterglow tabs, then reload', true);
+  });
+  return dbp;
 }
-async function idbGet(k) { const db = await idb(); return new Promise((res, rej) => { const q = db.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); }
-async function idbPut(k, v) { const db = await idb(); return new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => res(); t.onerror = () => rej(t.error); }); }
+// run fn(store) in one transaction; resolves with the last request's result once it commits
+function idbTx(name, mode, fn) {
+  return idb().then((db) => new Promise((res, rej) => {
+    const t = db.transaction(name, mode); let out;
+    const q = fn(t.objectStore(name)); if (q) q.onsuccess = () => { out = q.result; };
+    t.oncomplete = () => res(out); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error);
+  }));
+}
+const idbGet = (k) => idbTx('kv', 'readonly', (st) => st.get(k));
+const idbPut = (k, v) => idbTx('kv', 'readwrite', (st) => st.put(v, k));
+const idbDel = (k) => idbTx('kv', 'readwrite', (st) => st.delete(k));
 const withTimeout = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r(null), ms))]);
 const fontReady = (async () => {
   const sources = [
@@ -118,7 +137,7 @@ async function loadFontFile(file) {
   updateMediaLabels(); changed();
 }
 // Logo: SVG or PNG, drawn last at the bottom centre with no effects. Kept in this browser (IndexedDB).
-async function useLogo(blob, name, save) {
+async function useLogo(blob, name, save, turnOn = true) {
   const url = URL.createObjectURL(blob);
   const img = new Image();
   try { await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; }); }
@@ -130,14 +149,14 @@ async function useLogo(blob, name, save) {
     c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); src = c;
   }
   renderer.setLogo(src);
-  media.logo = src; media.logoName = name;
-  if (save) { S.logo.on = true; try { await idbPut('logo', { blob, name }); } catch (e) {} }
+  media.logo = src; media.logoName = name; media.logoBlob = blob;
+  if (save) { if (turnOn) S.logo.on = true; try { await idbPut('logo', { blob, name }); } catch (e) {} }
   updateLogoLabel(); changed();
   return true;
 }
 function clearLogo() {
-  renderer.setLogo(null); media.logo = null; media.logoName = '';
-  idb().then((db) => db.transaction('kv', 'readwrite').objectStore('kv').delete('logo')).catch(() => {});
+  renderer.setLogo(null); media.logo = null; media.logoName = ''; media.logoBlob = null;
+  idbDel('logo').catch(() => {});
   updateLogoLabel(); changed();
 }
 const logoInput = document.createElement('input');
@@ -210,10 +229,13 @@ function erf(x) {
   const y = 1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
   return x >= 0 ? y : -y;
 }
-let iconSeq = 0;
+// Two icon slots (Icon, Icon 2: partner posts), same look; Icon 2 draws on top.
+const ICON_KEYS = ['icon', 'icon2'];
+const iconBoxes = {}; // drag handles on the stage, made with the stage
+const icons = Object.fromEntries(ICON_KEYS.map((k) => [k, { img: null, name: '', blob: null, built: null, key: '', seq: 0, label: () => {} }]));
 // -> { canvas, cx, cy (picture centre, fraction of the canvas), w, h (frame fractions) } at up to 2x output
-function iconCanvas(I, W, H) {
-  const img = media.icon; if (!img) return null;
+function iconCanvas(img, I, W, H) {
+  if (!img) return null;
   const Dout = I.size / 100 * H, q = Math.min(2, 2048 / Math.max(1, Dout)), D = Dout * q;
   const badge = I.badge.trim();
   const pr = ICN.pill * D / 2, pc = [ICN.pillX * D, ICN.pillY * D], gm = 3 * ICN.blurs[2][0] * D;
@@ -257,59 +279,63 @@ function iconCanvas(I, W, H) {
   }
   return { canvas: cv, cx: ox / cv.width, cy: oy / cv.height, w: cv.width / q / W, h: cv.height / q / H };
 }
-let iconKey = '';
-const iconKeyNow = () => { const I = S.icon; return [S.format, I.size, I.zoom, I.edge, I.badge, textFamily, iconSeq].join('\u0001'); };
-function buildIcon() {
-  const [W, H] = outDims();
-  iconKey = iconKeyNow();
-  media.iconBuilt = iconCanvas(S.icon, W, H);
-  renderer.setIcon(media.iconBuilt ? media.iconBuilt.canvas : null);
+const iconKeyNow = (k) => { const I = S[k]; return [S.format, I.size, I.zoom, I.edge, I.badge, textFamily, icons[k].seq].join('\u0001'); };
+function buildIcon(k) {
+  const [W, H] = outDims(), o = icons[k];
+  o.key = iconKeyNow(k);
+  o.built = iconCanvas(o.img, S[k], W, H);
+  renderer.setIcon(k, o.built ? o.built.canvas : null);
 }
-function iconRectNow() { // GL frame uv
-  const b = media.iconBuilt; if (!b) return [0, 0, 1, 1];
-  const top = S.icon.y / 100 - b.cy * b.h;
-  return [S.icon.x / 100 - b.cx * b.w, 1 - top - b.h, b.w, b.h];
+function iconRectNow(k) { // GL frame uv
+  const b = icons[k].built; if (!b) return [0, 0, 1, 1];
+  const top = S[k].y / 100 - b.cy * b.h;
+  return [S[k].x / 100 - b.cx * b.w, 1 - top - b.h, b.w, b.h];
 }
-async function useIcon(blob, name, save) {
+async function useIcon(k, blob, name, save, turnOn = true) {
   const img = new Image(), url = URL.createObjectURL(blob);
   try { await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; }); }
   catch (e) { toast('Could not read that picture', true); return false; }
-  media.icon = img; media.iconName = name; iconSeq++;
-  if (save) { S.icon.on = true; try { await idbPut('icon', { blob, name }); } catch (e) {} }
-  updateIconLabel(); changed();
+  const o = icons[k], first = !o.img;
+  // a first partner logo goes next to the main one, same size, slightly overlapping
+  if (save && turnOn && k === 'icon2' && first && icons.icon.img && S.icon.on) {
+    const [W, H] = outDims();
+    Object.assign(S.icon2, { size: S.icon.size, y: S.icon.y, x: +Math.min(100, S.icon.x + 0.8 * S.icon.size * H / W).toFixed(1) });
+  }
+  o.img = img; o.name = name; o.blob = blob; o.seq++;
+  if (save) { if (turnOn) S[k].on = true; try { await idbPut(k, { blob, name }); } catch (e) {} }
+  o.label(); changed();
   return true;
 }
-function clearIcon() {
-  media.icon = null; media.iconName = ''; iconSeq++;
-  idb().then((db) => db.transaction('kv', 'readwrite').objectStore('kv').delete('icon')).catch(() => {});
-  updateIconLabel(); changed();
+function clearIcon(k) {
+  const o = icons[k];
+  o.img = null; o.name = ''; o.blob = null; o.seq++;
+  idbDel(k).catch(() => {});
+  o.label(); changed();
 }
-const iconInput = document.createElement('input');
-iconInput.type = 'file'; iconInput.accept = 'image/*'; iconInput.hidden = true;
-iconInput.addEventListener('change', (e) => { const f = e.target.files[0]; if (f) useIcon(f, f.name, true); e.target.value = ''; });
-document.body.appendChild(iconInput);
-let updateIconLabel = () => {};
-function buildIconRows(parent) {
+function buildIconRows(parent, k) {
+  const o = icons[k];
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.hidden = true;
+  inp.addEventListener('change', (e) => { const f = e.target.files[0]; if (f) useIcon(k, f, f.name, true); e.target.value = ''; });
   const r = document.createElement('div'); r.className = 'font-row';
   const n = document.createElement('span'); n.className = 'font-name';
   const b = document.createElement('button'); b.className = 'ghost'; b.title = 'Any picture (PNG, JPG). It is cropped round. Stays in this browser.';
-  b.addEventListener('click', () => iconInput.click());
+  b.addEventListener('click', () => inp.click());
   const x = document.createElement('button'); x.className = 'ghost'; x.textContent = 'Remove';
-  x.addEventListener('click', clearIcon);
-  r.append(n, b, x);
+  x.addEventListener('click', () => clearIcon(k));
+  r.append(n, b, x, inp);
   const bi = document.createElement('input'); bi.className = 'text-in sub'; bi.type = 'text'; bi.spellcheck = false; bi.placeholder = 'Badge, e.g. 5x (optional)';
-  bi.addEventListener('input', () => { S.icon.badge = bi.value; changed(); });
+  bi.addEventListener('input', () => { S[k].badge = bi.value; changed(); });
   bi.addEventListener('keydown', (e) => e.stopPropagation());
   parent.append(r, bi);
-  updateIconLabel = () => {
-    n.textContent = media.icon ? media.iconName : 'No picture (round, feathered, badge optional)';
-    b.textContent = media.icon ? 'Replace' : 'Add picture';
-    x.hidden = !media.icon;
+  o.label = () => {
+    n.textContent = o.img ? o.name : k === 'icon' ? 'No picture (round, feathered, badge optional)' : 'Second picture, e.g. a partner logo';
+    b.textContent = o.img ? 'Replace' : 'Add picture';
+    x.hidden = !o.img;
   };
-  controls.push(() => { if (document.activeElement !== bi && bi.value !== S.icon.badge) bi.value = S.icon.badge; });
-  updateIconLabel();
+  controls.push(() => { if (document.activeElement !== bi && bi.value !== S[k].badge) bi.value = S[k].badge; });
+  o.label();
 }
-idbGet('icon').then((rec) => { if (rec && rec.blob) useIcon(rec.blob, rec.name, false); }).catch(() => {});
+for (const k of ICON_KEYS) idbGet(k).then((rec) => { if (rec && rec.blob) useIcon(k, rec.blob, rec.name, false); }).catch(() => {});
 
 const fontInput = document.createElement('input');
 fontInput.type = 'file'; fontInput.accept = '.otf,.ttf,.woff,.woff2'; fontInput.hidden = true;
@@ -439,26 +465,26 @@ function applySource() {
 const EXAMPLES = {
   gn: { label: 'GN', px: 602.302 / 1350,
     design: { text: 'GN', above: '', below: '', fill: 'fade', align: 'center', leading: 99, subSize: 20, aboveGap: 20, belowGap: 20, subStrength: 59, x: 50, y: 35.9 },
-    ca: { on: true, mode: 'radial', style: 'spectral', amount: 3, falloff: 1.5 }, grain: { on: true, amount: 10 }, look: { on: true }, logo: { on: false }, icon: { on: false } },
+    ca: { on: true, mode: 'radial', style: 'spectral', amount: 3, falloff: 1.5 }, grain: { on: true, amount: 10 }, look: { on: true }, logo: { on: false }, icon: { on: false }, icon2: { on: false } },
   burned: { label: '6,316,573', px: 164.825 / 675, // Obol Internal 97:47
     design: { text: '6,316,573', above: '', below: 'OBOL burned', fill: 'solid', align: 'center', leading: 99, subSize: 35, belowGap: 29, subStrength: 59, x: 50.8, y: 35.6 },
     // fringes measured off the Figma render: blue out, yellow-red in, about 19 px x distance from centre
-    ca: { on: true, mode: 'radial', style: 'rgb', amount: 17.5, falloff: 1 }, grain: { on: true, amount: 5 }, look: { on: false }, logo: { on: true, size: 6.1, y: 90.2 }, icon: { on: false } },
+    ca: { on: true, mode: 'radial', style: 'rgb', amount: 17.5, falloff: 1 }, grain: { on: true, amount: 5 }, look: { on: false }, logo: { on: true, size: 6.1, y: 90.2 }, icon: { on: false }, icon2: { on: false } },
   live: { label: 'LIVE ON OBOL', px: 262.614 / 1350, // Obol Internal 128:120: left aligned, X / Y = left edge, cap top
     design: { text: 'LIVE ON\nOBOL', above: '', below: '', fill: 'solid', align: 'left', leading: 99.3, x: 43.08, y: 24.44 },
     glow: { haloSize: 97, bloomSize: 15 }, // its blurs are 1.4x the GN ratio (halo 20% of the font size, bloom 3.1%)
     ca: { on: false }, grain: { on: false }, look: { on: false }, logo: { on: false },
-    icon: { on: true, badge: '5x', blend: 'hardlight', size: 45, x: 26.78, y: 40.42, zoom: 109.6, edge: 1.7 } },
+    icon: { on: true, badge: '5x', blend: 'hardlight', size: 45, x: 26.78, y: 40.42, zoom: 109.6, edge: 1.7 }, icon2: { on: false } },
 };
 function applyExample(id) {
   const ex = EXAMPLES[id];
   Object.assign(S.design, { source: 'text', blend: 'overlay', strength: 170 }, ex.design);
   S.glow = Object.assign(clone(DEFAULTS.glow), ex.glow || {});
-  for (const k of ['ca', 'grain', 'look', 'logo', 'icon']) Object.assign(S[k], ex[k] || {});
+  for (const k of ['ca', 'grain', 'look', 'logo', 'icon', 'icon2']) Object.assign(S[k], ex[k] || {});
   buildText();
   if (media.text) { const [W, H] = outDims(); S.design.size = Math.min(100, +(100 * ex.px * Math.min(W, H) / media.text.px).toFixed(1)); }
   updateMediaLabels(); changed();
-  const need = [ex.logo.on && !media.logo && 'a logo (Logo panel)', ex.icon.on && !media.icon && 'a picture (Icon panel)'].filter(Boolean);
+  const need = [ex.logo.on && !media.logo && 'a logo (Logo panel)', ex.icon.on && !icons.icon.img && 'a picture (Icon panel)'].filter(Boolean);
   if (need.length) toast('This post also has ' + need.join(' and ') + ': add it once, it stays in this browser');
 }
 function buildTextRows(parent) {
@@ -509,6 +535,17 @@ const ICON = {
   mute: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6h2.5l3.5-3v10l-3.5-3H2.5z"/><path d="m11 6 3.5 4M14.5 6 11 10"/></svg>',
 };
 
+function iconSection(k, title) {
+  return { key: k, title, toggle: true, rows: [
+    { type: 'custom', build: (p) => buildIconRows(p, k) },
+    { type: 'segs', segs: [{ key: k + '.blend', opts: [['hardlight', 'Hard light'], ['normal', 'Normal'], ['screen', 'Screen']] }] },
+    { type: 'slider', key: k + '.size', label: 'Size', min: 5, max: 100, step: 0.1 },
+    { type: 'slider', key: k + '.x', label: 'X', min: 0, max: 100, step: 0.1 },
+    { type: 'slider', key: k + '.y', label: 'Y', min: 0, max: 100, step: 0.1 },
+    { type: 'slider', key: k + '.zoom', label: 'Zoom', min: 50, max: 200, step: 0.1 },
+    { type: 'slider', key: k + '.edge', label: 'Edge', min: 0, max: 10, step: 0.1 },
+  ] };
+}
 const SECTIONS = [
   { key: 'design', title: 'Design', rows: [
     { type: 'custom', build: (p) => buildTextRows(p) },
@@ -524,15 +561,8 @@ const SECTIONS = [
     { type: 'slider', key: 'design.x', label: 'X', min: 0, max: 100, step: 0.1 },
     { type: 'slider', key: 'design.y', label: 'Y', min: 0, max: 100, step: 0.1 },
   ] },
-  { key: 'icon', title: 'Icon', toggle: true, rows: [
-    { type: 'custom', build: (p) => buildIconRows(p) },
-    { type: 'segs', segs: [{ key: 'icon.blend', opts: [['hardlight', 'Hard light'], ['normal', 'Normal'], ['screen', 'Screen']] }] },
-    { type: 'slider', key: 'icon.size', label: 'Size', min: 5, max: 100, step: 0.1 },
-    { type: 'slider', key: 'icon.x', label: 'X', min: 0, max: 100, step: 0.1 },
-    { type: 'slider', key: 'icon.y', label: 'Y', min: 0, max: 100, step: 0.1 },
-    { type: 'slider', key: 'icon.zoom', label: 'Zoom', min: 50, max: 200, step: 0.1 },
-    { type: 'slider', key: 'icon.edge', label: 'Edge', min: 0, max: 10, step: 0.1 },
-  ] },
+  iconSection('icon', 'Icon'),
+  iconSection('icon2', 'Icon 2'),
   { key: 'logo', title: 'Logo', toggle: true, rows: [
     { type: 'custom', build: (p) => buildLogoRow(p) },
     { type: 'slider', key: 'logo.size', label: 'Size', min: 1, max: 30, step: 0.1 },
@@ -683,7 +713,7 @@ function syncSection(key) {
   const el = sectionEls[key]; if (!el) return;
   if (el.sw) el.sw.checked = !!S[key].on;
   el.root.classList.toggle('off', key === 'design' ? (S.design.source === 'image' && !media.image)
-    : key === 'logo' ? (!S.logo.on || !media.logo) : key === 'icon' ? (!S.icon.on || !media.icon)
+    : key === 'logo' ? (!S.logo.on || !media.logo) : icons[key] ? (!S[key].on || !icons[key].img)
     : ('on' in S[key] ? !S[key].on : false));
 }
 function syncAll() {
@@ -774,8 +804,7 @@ let saveTimer = null;
 function changed() {
   if (S.design.source === 'text' && textKeyNow() !== textKey) buildText(); // text, subtitles, gaps or format changed
   renderer.glowScale = glowScaleNow();
-  if (iconKeyNow() !== iconKey) buildIcon();
-  renderer.iconRect = iconRectNow();
+  for (const k of ICON_KEYS) { if (iconKeyNow(k) !== icons[k].key) buildIcon(k); renderer.icons[k].rect = iconRectNow(k); }
   syncAll();
   invalidate();
   updateDesignBox();
@@ -791,14 +820,18 @@ video.style.cssText = 'position:fixed;left:0;bottom:0;width:2px;height:2px;opaci
 document.body.appendChild(video);
 let bgDirty = false;
 
-function setVideoFile(file) {
+function setVideoFile(file, want) { // want: { in, out } trim from a preset
   const url = URL.createObjectURL(file);
+  const trim = (dur) => {
+    if (!want) { clip.in = 0; clip.out = dur; return; }
+    clip.out = Math.min(dur, Math.max(0, want.out || dur)); clip.in = Math.min(Math.max(0, want.in || 0), clip.out);
+  };
   if (file.type.startsWith('image/')) {
     const img = new Image();
     img.onload = () => {
       video.pause(); video.removeAttribute('src'); video.load();
       Object.assign(media, { kind: 'image', el: img, file, name: file.name, w: img.naturalWidth, h: img.naturalHeight, duration: 6 });
-      clip.in = 0; clip.out = 6; clock.t = 0;
+      trim(6); clock.t = clip.in;
       renderer.setBackground(img, img.naturalWidth, img.naturalHeight);
       updateMediaLabels(); updateTransport(); invalidate();
     };
@@ -811,7 +844,8 @@ function setVideoFile(file) {
   media.file = file; media.name = file.name;
   video.onloadedmetadata = () => {
     Object.assign(media, { kind: 'video', el: video, w: video.videoWidth, h: video.videoHeight, duration: video.duration || 0 });
-    clip.in = 0; clip.out = media.duration;
+    trim(media.duration);
+    if (clip.in > 0) video.currentTime = clip.in;
     updateMediaLabels(); updateTransport();
   };
   video.onloadeddata = () => { renderer.setBackground(video, video.videoWidth, video.videoHeight); invalidate(); };
@@ -834,22 +868,27 @@ function placeDesign() {
   S.design.size = Math.round(w * 100);
 }
 
+function loadDesignImage(blob, name) {
+  return new Promise((res) => {
+    const img = new Image();
+    img.onload = () => { media.image = img; media.imageName = name; media.imageBlob = blob; res(true); };
+    img.onerror = () => res(false);
+    img.src = URL.createObjectURL(blob);
+  });
+}
 function setDesign(file, keepPlacement) {
   if (!file) { // remove the image: back to text
-    media.image = null; media.imageName = '';
+    media.image = null; media.imageName = ''; media.imageBlob = null;
     S.design.source = 'text'; applySource();
     return;
   }
-  const img = new Image();
-  img.onload = () => {
-    media.image = img; media.imageName = file.name || 'Pasted design';
+  loadDesignImage(file, file.name || 'Pasted design').then((ok) => {
+    if (!ok) { toast('Could not read that image', true); return; }
     S.design.source = 'image';
-    renderer.setDesign(img);
+    renderer.setDesign(media.image);
     if (!keepPlacement) placeDesign();
     updateMediaLabels(); changed();
-  };
-  img.onerror = () => toast('Could not read that image', true);
-  img.src = URL.createObjectURL(file);
+  });
 }
 
 function fmtTime(t) { t = Math.max(0, t || 0); const m = Math.floor(t / 60); const s = t - m * 60; return m + ':' + (s < 10 ? '0' : '') + s.toFixed(1); }
@@ -915,37 +954,43 @@ function updateDesignBox() {
   box.style.width = (r[2] * cssW) + 'px';
   box.style.height = (r[3] * cssH) + 'px';
 }
-const iconBox = $('iconBox');
-function updateIconBox() { // the round picture only (not the badge glow)
-  const ib = $('iconBox');
-  if (!(S.icon.on && media.icon)) { ib.style.display = 'none'; return; }
-  ib.style.display = '';
-  const d = S.icon.size / 100 * cssH;
-  ib.style.left = (S.icon.x / 100 * cssW - d / 2) + 'px';
-  ib.style.top = (S.icon.y / 100 * cssH - d / 2) + 'px';
-  ib.style.width = ib.style.height = d + 'px';
+for (const k of ICON_KEYS) {
+  const ib = document.createElement('div'); ib.className = 'design-box'; ib.style.borderRadius = '50%';
+  ib.title = 'Drag to move ' + (k === 'icon' ? 'the icon' : 'icon 2') + ' (⌘ + scroll to scale)';
+  $('frame').insertBefore(ib, $('badge'));
+  iconBoxes[k] = ib;
+  let drag = null;
+  ib.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault(); ib.setPointerCapture(e.pointerId); ib.classList.add('drag');
+    drag = { x: e.clientX, y: e.clientY, sx: S[k].x, sy: S[k].y };
+  });
+  ib.addEventListener('pointermove', (e) => {
+    if (!drag || !ib.hasPointerCapture(e.pointerId)) return;
+    S[k].x = +(drag.sx + (e.clientX - drag.x) / cssW * 100).toFixed(1);
+    S[k].y = +(drag.sy + (e.clientY - drag.y) / cssH * 100).toFixed(1);
+    changed();
+  });
+  const end = () => { drag = null; ib.classList.remove('drag'); };
+  ib.addEventListener('pointerup', end); ib.addEventListener('pointercancel', end);
+  ib.addEventListener('wheel', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    S[k].size = Math.min(100, Math.max(5, +(S[k].size * Math.exp(-e.deltaY * 0.01)).toFixed(1)));
+    changed();
+  }, { passive: false });
 }
-let idrag = null;
-iconBox.addEventListener('pointerdown', (e) => {
-  if (e.button !== 0) return;
-  e.preventDefault(); iconBox.setPointerCapture(e.pointerId); iconBox.classList.add('drag');
-  idrag = { x: e.clientX, y: e.clientY, sx: S.icon.x, sy: S.icon.y };
-});
-iconBox.addEventListener('pointermove', (e) => {
-  if (!idrag || !iconBox.hasPointerCapture(e.pointerId)) return;
-  S.icon.x = +(idrag.sx + (e.clientX - idrag.x) / cssW * 100).toFixed(1);
-  S.icon.y = +(idrag.sy + (e.clientY - idrag.y) / cssH * 100).toFixed(1);
-  changed();
-});
-const endIcon = () => { idrag = null; iconBox.classList.remove('drag'); };
-iconBox.addEventListener('pointerup', endIcon);
-iconBox.addEventListener('pointercancel', endIcon);
-iconBox.addEventListener('wheel', (e) => {
-  if (!(e.ctrlKey || e.metaKey)) return;
-  e.preventDefault();
-  S.icon.size = Math.min(100, Math.max(5, +(S.icon.size * Math.exp(-e.deltaY * 0.01)).toFixed(1)));
-  changed();
-}, { passive: false });
+function updateIconBox() { // the round pictures only (not the badge glow)
+  for (const k of ICON_KEYS) {
+    const ib = iconBoxes[k]; if (!ib) continue;
+    if (!(S[k].on && icons[k].img)) { ib.style.display = 'none'; continue; }
+    ib.style.display = '';
+    const d = S[k].size / 100 * cssH;
+    ib.style.left = (S[k].x / 100 * cssW - d / 2) + 'px';
+    ib.style.top = (S[k].y / 100 * cssH - d / 2) + 'px';
+    ib.style.width = ib.style.height = d + 'px';
+  }
+}
 let bdrag = null;
 box.addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
@@ -1285,9 +1330,168 @@ function toast(msg, err) {
 async function loadDemo() {
   try {
     const v = await fetch('demo/demo.mp4', { cache: 'no-cache' });
-    if (v.ok) setVideoFile(new File([await v.blob()], 'demo.mp4', { type: 'video/mp4' }));
+    if (v.ok) { const b = await v.blob(); if (!media.file && !media.kind) setVideoFile(new File([b], 'demo.mp4', { type: 'video/mp4' })); } // a preset may have loaded first
   } catch (e) {}
 }
+
+// ------------------------------------------------------------------ presets
+// A preset is every setting plus the files it uses (background, design image, pictures, logo), kept in
+// this browser's IndexedDB. Files are stored once by content hash, so presets that share a video share it.
+
+const mediaHash = new WeakMap(); // blob -> hash, so re-saving does not re-read big videos
+async function hashBlob(blob) {
+  if (mediaHash.has(blob)) return mediaHash.get(blob);
+  let h;
+  if (crypto.subtle) {
+    const d = new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()));
+    h = Array.from(d, (b) => b.toString(16).padStart(2, '0')).join('');
+  } else h = 'f' + blob.size + '-' + (blob.name || '') + '-' + (blob.lastModified || 0);
+  mediaHash.set(blob, h);
+  return h;
+}
+async function putMedia(blob) {
+  const h = await hashBlob(blob);
+  if (!(await idbTx('media', 'readonly', (st) => st.count(h)))) await idbTx('media', 'readwrite', (st) => st.put(blob, h));
+  return h;
+}
+const PRESET_FILES = ['bg', 'design', 'icon', 'icon2', 'logo'];
+async function gcMedia() { // drop files no preset uses any more
+  const all = await idbTx('presets', 'readonly', (st) => st.getAll());
+  const used = new Set(all.flatMap((p) => PRESET_FILES.map((k) => p[k] && p[k].h).filter(Boolean)));
+  const keys = await idbTx('media', 'readonly', (st) => st.getAllKeys());
+  const drop = keys.filter((k) => !used.has(k));
+  if (drop.length) await idbTx('media', 'readwrite', (st) => { drop.forEach((k) => st.delete(k)); });
+}
+function snapThumb() { // call right after draw(), in the same task (the GL buffer is not preserved)
+  const [W, H] = outDims(), k = 160 / Math.max(W, H);
+  const c = mkCanvas(W * k, H * k);
+  try { c.getContext('2d').drawImage(canvas, 0, 0, c.width, c.height); return c.toDataURL('image/jpeg', 0.8); } catch (e) { return ''; }
+}
+const fmtMB = (b) => (b / 1e6 < 10 ? (b / 1e6).toFixed(1) : Math.round(b / 1e6)) + ' MB';
+let presetList = [], curPreset = '', renderPresets = () => {};
+async function refreshPresets() {
+  try { presetList = (await idbTx('presets', 'readonly', (st) => st.getAll())).sort((a, b) => b.saved - a.saved); } catch (e) { presetList = []; }
+  renderPresets();
+}
+async function savePreset(name) {
+  name = name.trim();
+  if (!name) { toast('Give the preset a name first', true); return false; }
+  invalidate(); draw(); // fresh frame for the thumbnail
+  const rec = { name, saved: Date.now(), thumb: snapThumb(), S: clone(S), clip: { in: clip.in, out: clip.out }, bytes: 0 };
+  const files = {
+    bg: media.kind && media.file ? [media.file, media.name] : null,
+    design: media.image && media.imageBlob ? [media.imageBlob, media.imageName] : null,
+    icon: icons.icon.img && icons.icon.blob ? [icons.icon.blob, icons.icon.name] : null,
+    icon2: icons.icon2.img && icons.icon2.blob ? [icons.icon2.blob, icons.icon2.name] : null,
+    logo: media.logo && media.logoBlob ? [media.logoBlob, media.logoName] : null,
+  };
+  try {
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+    if (files.bg && files.bg[0].size > 50e6) toast('Saving preset with a ' + fmtMB(files.bg[0].size) + ' video…');
+    for (const k of PRESET_FILES) {
+      if (!files[k]) continue;
+      const [blob, nm] = files[k];
+      rec[k] = { h: await putMedia(blob), name: nm, type: blob.type || '' };
+      rec.bytes += blob.size;
+    }
+    await idbTx('presets', 'readwrite', (st) => st.put(rec, name));
+    gcMedia().catch(() => {});
+  } catch (e) {
+    toast(e && e.name === 'QuotaExceededError' ? 'Not enough browser storage for this preset (try a shorter video)' : 'Could not save preset (' + ((e && e.message) || e) + ')', true);
+    return false;
+  }
+  curPreset = name;
+  await refreshPresets();
+  toast('Saved "' + name + '" · ' + fmtMB(rec.bytes) + ' · stays in this browser');
+  return true;
+}
+async function loadPreset(name) {
+  let rec, got;
+  try {
+    rec = await idbTx('presets', 'readonly', (st) => st.get(name));
+    if (!rec) return;
+    got = await Promise.all(PRESET_FILES.map(async (k) => {
+      if (!rec[k]) return null;
+      const b = await idbTx('media', 'readonly', (st) => st.get(rec[k].h));
+      if (b) mediaHash.set(b, rec[k].h);
+      return b || null;
+    }));
+  } catch (e) { toast('Could not load preset (' + ((e && e.message) || e) + ')', true); return; }
+  const f = Object.fromEntries(PRESET_FILES.map((k, i) => [k, got[i]]));
+  S = merge(DEFAULTS, rec.S);
+  // pictures and logo become the current ones; one the preset did not have is kept but switched off
+  for (const k of ICON_KEYS) { if (f[k]) await useIcon(k, f[k], rec[k].name, true, false); else S[k].on = false; }
+  if (f.logo) await useLogo(f.logo, rec.logo.name, true, false); else S.logo.on = false;
+  if (f.design) await loadDesignImage(f.design, rec.design.name);
+  if (S.design.source === 'image' && !media.image) S.design.source = 'text';
+  textKey = '';
+  if (S.design.source === 'text') buildText(); else renderer.setDesign(media.image);
+  if (f.bg) {
+    const file = new File([f.bg], rec.bg.name, { type: rec.bg.type || f.bg.type });
+    mediaHash.set(file, rec.bg.h);
+    setVideoFile(file, rec.clip);
+  } else if (media.kind && rec.clip) { clip.out = Math.min(media.duration, rec.clip.out); clip.in = Math.min(rec.clip.in, clip.out); }
+  const missing = PRESET_FILES.filter((k) => rec[k] && !f[k]);
+  layout(); updateMediaLabels(); syncAll(); changed();
+  curPreset = name; renderPresets();
+  toast(missing.length ? 'Loaded "' + name + '", but its ' + missing.join(', ') + ' file is gone' : 'Loaded "' + name + '"', !!missing.length);
+}
+async function deletePreset(name) {
+  try { await idbTx('presets', 'readwrite', (st) => st.delete(name)); await gcMedia(); } catch (e) {}
+  if (curPreset === name) curPreset = '';
+  await refreshPresets();
+}
+function buildPresets() {
+  const root = document.createElement('div'); root.className = 'sec';
+  root.innerHTML = '<div class="sec-head"><div class="t">Presets</div><span class="pre-use"></span></div>'
+    + '<div class="pre-new"><input type="text" spellcheck="false" placeholder="Preset name"><button class="ghost">Save</button></div>'
+    + '<div class="pre-list"></div>';
+  side.insertBefore(root, side.firstChild);
+  const inp = root.querySelector('input'), btn = root.querySelector('.pre-new button'), list = root.querySelector('.pre-list'), use = root.querySelector('.pre-use');
+  const syncBtn = () => {
+    const ex = presetList.some((p) => p.name === inp.value.trim());
+    btn.textContent = ex ? 'Update' : 'Save';
+    btn.title = ex ? 'Overwrite this preset with what is on screen now' : 'Save all settings plus the video / image, design, pictures and logo in this browser';
+  };
+  const save = async () => { btn.disabled = true; try { await savePreset(inp.value); } finally { btn.disabled = false; syncBtn(); } };
+  btn.addEventListener('click', save);
+  inp.addEventListener('input', syncBtn);
+  inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); save(); } });
+  renderPresets = () => {
+    list.innerHTML = '';
+    if (!presetList.length) {
+      const e = document.createElement('div'); e.className = 'pre-empty';
+      e.textContent = 'Saves every setting with the video or image, design, pictures and logo. Kept in this browser.';
+      list.appendChild(e);
+    }
+    for (const p of presetList) {
+      const r = document.createElement('div'); r.className = 'pre' + (p.name === curPreset ? ' cur' : '');
+      r.title = 'Load "' + p.name + '"';
+      const im = document.createElement('img'); if (p.thumb) im.src = p.thumb; im.alt = '';
+      const t = document.createElement('div'); t.className = 'pn'; t.textContent = p.name;
+      const sm = document.createElement('small');
+      sm.textContent = [p.bg ? p.bg.name : 'no background', fmtMB(p.bytes || 0)].join(' · ');
+      t.appendChild(sm);
+      const x = document.createElement('button'); x.className = 'icon-btn del'; x.title = 'Delete preset';
+      x.innerHTML = '<svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg>';
+      x.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!x.classList.contains('arm')) { // two clicks: the first arms it
+          x.classList.add('arm'); x.title = 'Click again to delete';
+          setTimeout(() => { x.classList.remove('arm'); x.title = 'Delete preset'; }, 2500);
+          return;
+        }
+        deletePreset(p.name);
+      });
+      r.addEventListener('click', () => { inp.value = p.name; syncBtn(); loadPreset(p.name); });
+      r.append(im, t, x); list.appendChild(r);
+    }
+    syncBtn();
+    if (navigator.storage && navigator.storage.estimate) navigator.storage.estimate().then((q) => { use.textContent = presetList.length ? fmtMB(q.usage || 0) + ' used' : ''; }).catch(() => {});
+  };
+  refreshPresets();
+}
+buildPresets();
 
 // images are not kept between sessions, so always start from the text design
 if (S.design.source === 'image') S.design.source = 'text';
@@ -1302,4 +1506,4 @@ const showText = () => { if (S.design.source === 'text') buildText(); updateMedi
 withTimeout(fontReady, 800).then(showText);
 fontReady.then(showText);
 
-window.afterglow = { get S() { return S; }, set S(v) { S = merge(DEFAULTS, v); changed(); }, textCanvas, buildText, setDesign, applySource, renderer, media, clip, setMode, exportMP4, draw, video };
+window.afterglow = { get S() { return S; }, set S(v) { S = merge(DEFAULTS, v); changed(); }, savePreset, loadPreset, deletePreset, icons, textCanvas, buildText, setDesign, applySource, renderer, media, clip, setMode, exportMP4, draw, video };

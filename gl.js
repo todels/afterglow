@@ -50,7 +50,7 @@ void main() {
 const FS_COMP = `#version 300 es
 precision highp float;
 in vec2 vUv;
-uniform sampler2D uBg, uDesign, uBloom, uHalo, uIcon;
+uniform sampler2D uBg, uDesign, uBloom, uHalo, uIcon, uIcon2;
 uniform vec2 uRes, uBgSize;
 uniform vec3 uBgX;          // zoom, panX, panY (-1..1)
 uniform int uHasBg, uHasDesign;
@@ -62,8 +62,8 @@ uniform float uHaloAmt, uBloomAmt;
 uniform float uExposure, uContrast, uSat;
 uniform int uVigOn;
 uniform float uVig, uVigStart;
-uniform int uIconOn, uIconBlend;
-uniform vec4 uIconRect;
+uniform int uIconOn, uIconBlend, uIcon2On, uIcon2Blend;
+uniform vec4 uIconRect, uIcon2Rect;
 out vec4 o;
 
 vec3 blendOf(vec3 b, vec3 s, int m) {
@@ -77,6 +77,11 @@ vec3 layer(vec3 b, vec4 p, float amt, int m) {
   if (p.a <= 0.0005 || amt <= 0.0) return b;
   vec3 s = clamp(p.rgb / p.a, 0.0, 1.0);
   return clamp(mix(b, blendOf(b, s, m), p.a * amt), 0.0, 1.0);
+}
+vec3 iconLayer(vec3 c, sampler2D t, vec4 r, int m) { // icon group (picture + badge), above the text like in Figma
+  vec2 d = (vUv - r.xy) / r.zw;
+  vec4 p = texture(t, d) * (step(0.0, d.x) * step(0.0, d.y) * step(d.x, 1.0) * step(d.y, 1.0));
+  return layer(c, p, 1.0, m);
 }
 
 void main() {
@@ -110,11 +115,8 @@ void main() {
       }
     }
   }
-  if (uIconOn == 1) { // icon group (picture + badge), above the text like in Figma
-    vec2 d = (uv - uIconRect.xy) / uIconRect.zw;
-    vec4 p = texture(uIcon, d) * (step(0.0, d.x) * step(0.0, d.y) * step(d.x, 1.0) * step(d.y, 1.0));
-    c = layer(c, p, 1.0, uIconBlend);
-  }
+  if (uIconOn == 1) c = iconLayer(c, uIcon, uIconRect, uIconBlend);
+  if (uIcon2On == 1) c = iconLayer(c, uIcon2, uIcon2Rect, uIcon2Blend);
   if (uVigOn == 1 && uVig > 0.0) {
     vec2 q = (uv - 0.5) * vec2(uRes.x / uRes.y, 1.0);
     float r = length(q) / length(vec2(uRes.x / uRes.y, 1.0) * 0.5);
@@ -245,8 +247,7 @@ export class Renderer {
     // 1x1 transparent stand-in for unused samplers, so no unit is left pointing at a render target
     // (e.g. comp.tex from the last final pass), which WebGL treats as a feedback loop and skips the draw.
     this.logo = { tex: null, w: 0, h: 0 };
-    this.icon = { tex: null };
-    this.iconRect = [0, 0, 1, 1]; // GL frame uv, set by the app
+    this.icons = { icon: { tex: null, rect: [0, 0, 1, 1] }, icon2: { tex: null, rect: [0, 0, 1, 1] } }; // rect: GL frame uv, set by the app
     this.glowScale = 1; // text mode: blur sizes follow the text size (set by the app)
     this.blank = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.blank);
@@ -357,9 +358,9 @@ export class Renderer {
     this.logo = { tex: t, w: img.naturalWidth || img.width, h: img.naturalHeight || img.height };
   }
   // Icon group: canvas built by the app (picture, round feathered mask, badge), placed at iconRect.
-  setIcon(img) {
-    const gl = this.gl;
-    if (this.icon.tex) { gl.deleteTexture(this.icon.tex); this.icon.tex = null; }
+  setIcon(key, img) {
+    const gl = this.gl, ic = this.icons[key];
+    if (ic.tex) { gl.deleteTexture(ic.tex); ic.tex = null; }
     if (!img) return;
     const t = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, t);
@@ -372,7 +373,7 @@ export class Renderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    this.icon = { tex: t };
+    ic.tex = t;
   }
   // Logo rect in GL frame uv (size = % of frame height, y = centre % from the top)
   logoRect(S, W, H) {
@@ -438,13 +439,11 @@ export class Renderer {
     this._bind(c, 'uDesign', 1, this.blank);
     this._bind(c, 'uBloom', 2, this.blank);
     this._bind(c, 'uHalo', 3, this.blank);
-    this._bind(c, 'uIcon', 4, this.blank);
-    const iconOn = !!(S.icon && S.icon.on && this.icon.tex);
-    gl.uniform1i(c.u.uIconOn, iconOn ? 1 : 0);
-    if (iconOn) {
-      this._bind(c, 'uIcon', 4, this.icon.tex);
-      const r = this.iconRect; gl.uniform4f(c.u.uIconRect, r[0], r[1], r[2], r[3]);
-      gl.uniform1i(c.u.uIconBlend, BLEND[S.icon.blend] ?? 4);
+    for (const [k, u, unit] of [['icon', 'uIcon', 4], ['icon2', 'uIcon2', 5]]) {
+      const ic = this.icons[k], on = !!(S[k] && S[k].on && ic.tex);
+      this._bind(c, u, unit, on ? ic.tex : this.blank);
+      gl.uniform1i(c.u[u + 'On'], on ? 1 : 0);
+      if (on) { const r = ic.rect; gl.uniform4f(c.u[u + 'Rect'], r[0], r[1], r[2], r[3]); gl.uniform1i(c.u[u + 'Blend'], BLEND[S[k].blend] ?? 4); }
     }
     gl.uniform2f(c.u.uBgSize, this.bg.w || 1, this.bg.h || 1);
     gl.uniform3f(c.u.uBgX, S.video.zoom / 100, S.video.panX / 100, -S.video.panY / 100);
